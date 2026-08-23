@@ -1,54 +1,104 @@
 import tkinter as tk
 import cv2
+import time
+import threading
 from PIL import Image, ImageTk
 
+# Import our newly created backend modules
+from database import DatabaseManager
+from vision_model import VisionPredictor
+
 class SafeDriveApp:
-    def __init__(self, root):
+    def __init__(self, root) -> None:
         self.root = root
-        self.root.title("SafeDrive Monitor - Live Vision")
-        self.root.geometry("800x600")
+        self.root.title("SafeDrive Monitor - Real-Time Inference")
+        self.root.geometry("900x700")
         
-        # 1. Add a title
-        self.title_label = tk.Label(root, text="SafeDrive Monitor: Live Feed", font=("Arial", 20, "bold"))
+        # 1. Initialize Core Persistence and ML Modules
+        self.db = DatabaseManager()
+        self.vision = VisionPredictor()
+        
+        # 2. Application State
+        self.current_frame = None
+        self.status = "INITIALIZING"
+        self.confidence = 0.0
+        self.is_running = True
+
+        self._build_ui()
+        
+        # 3. Hardware Initialization
+        self.cap = cv2.VideoCapture(0)
+        
+        # 4. Threading: Run prediction engine in background to prevent UI blocking
+        self.inference_thread = threading.Thread(target=self._run_inference, daemon=True)
+        self.inference_thread.start()
+        
+        self._update_video_feed()
+
+    def _build_ui(self) -> None:
+        self.title_label = tk.Label(self.root, text="SafeDrive Monitor", font=("Helvetica", 24, "bold"))
         self.title_label.pack(pady=10)
         
-        # 2. Add a label where the video will be displayed
-        self.video_label = tk.Label(root)
-        self.video_label.pack()
+        self.video_label = tk.Label(self.root, bg="black")
+        self.video_label.pack(pady=10)
         
-        # 3. Turn on the webcam (0 is usually your laptop's default camera)
-        self.cap = cv2.VideoCapture(0) 
-        
-        # 4. Start the video loop
-        self.update_frame()
+        # Status indicators for color-coded alerts
+        self.status_label = tk.Label(self.root, text="Status: WAITING", font=("Helvetica", 18, "bold"), fg="white", bg="gray")
+        self.status_label.pack(pady=10, fill=tk.X)
 
-    def update_frame(self):
-        # Read a frame from the webcam
+    def _run_inference(self) -> None:
+        """Background thread evaluating frames for prediction and logging."""
+        while self.is_running:
+            if self.current_frame is not None:
+                try:
+                    # Execute Vision Model inference
+                    self.status, self.confidence = self.vision.predict(self.current_frame)
+                    
+                    # Log to SQLite database for post-hoc analysis
+                    self.db.log_prediction(self.status, self.confidence)
+                    
+                    # Update UI color-coding based on alert thresholds
+                    if self.status == "NORMAL":
+                        color = "green"
+                    elif self.status == "DROWSY":
+                        color = "orange"
+                    else:
+                        color = "red"
+                        
+                    self.status_label.config(text=f"Status: {self.status} (Conf: {self.confidence:.2f})", bg=color)
+                except Exception as e:
+                    print(f"Inference execution failed: {e}")
+            
+            # Throttling inference to ~2 FPS to reduce CPU load 
+            time.sleep(0.5)
+
+    def _update_video_feed(self) -> None:
+        """Main thread loop for rendering the camera feed."""
         ret, frame = self.cap.read()
         
         if ret:
-            # OpenCV uses BGR colors, but Tkinter needs RGB. Let's convert it.
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # Store raw frame for the inference thread
+            self.current_frame = frame.copy()
             
-            # Convert the frame to an image Tkinter can use
-            img = Image.fromarray(frame)
+            # Convert frame for Tkinter rendering
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
             imgtk = ImageTk.PhotoImage(image=img)
             
-            # Update the label with the new frame
             self.video_label.imgtk = imgtk
             self.video_label.configure(image=imgtk)
         
-        # Tell the app to run this function again in 15 milliseconds (creates the video effect)
-        self.root.after(15, self.update_frame)
-        
-    def on_closing(self):
-        # When you close the app, release the webcam so other apps can use it
+        if self.is_running:
+            self.root.after(30, self._update_video_feed)
+
+    def on_closing(self) -> None:
+        """Graceful shutdown protocol."""
+        self.is_running = False
         self.cap.release()
         self.root.destroy()
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = SafeDriveApp(root)
-    # Ensure the camera turns off when the window is closed
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     root.mainloop()
