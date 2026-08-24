@@ -12,3 +12,8 @@ datasets/
 # Python Cache
 __pycache__/
 *.pyc
+
+# Virtual Environments
+safedrive_env/
+venv/
+.env
