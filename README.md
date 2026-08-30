@@ -1,6 +1,6 @@
 # SafeDrive Monitor
 
-## Dataset Instructions (Engineered by Dev 1)
+## Dataset Instructions 
 We are utilizing the 111GB UTA-RLDD dataset for temporal GRU training. **Do not download this manually to your local hard drive.**
 
 To access the data directly in Google Colab for model training:
