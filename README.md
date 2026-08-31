@@ -1,8 +1,12 @@
 # SafeDrive Monitor
 
-## Dataset Instructions 
+## Dataset Instructions
 We are utilizing the 111GB UTA-RLDD dataset for temporal GRU training. **Do not download this manually to your local hard drive.**
 
+*   **Official Source:** [UTA-RLDD Homepage (University of Texas at Arlington)](https://sites.google.com/view/utarldd/home)
+*   **Kaggle Mirror:** [UTA Real-Life Drowsiness Dataset](https://www.kaggle.com/datasets/rishab260/uta-reallife-drowsiness-dataset)
+
+### Cloud Training Access
 To access the data directly in Google Colab for model training:
 1. Install the Kaggle library: `pip install kagglehub`
 2. Run the automated script: `python data/cloud_downloader.py`
