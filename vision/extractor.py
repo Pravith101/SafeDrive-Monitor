@@ -14,6 +14,7 @@ class FrameMetrics:
 
 class VisionExtractor:
     def __init__(self):
+        # Using the standard import now that Python 3.11 is active
         self.mp_face_mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
             max_num_faces=1,
@@ -23,46 +24,52 @@ class VisionExtractor:
         self.left_eye = [362, 385, 386, 263, 374, 380]
         self.right_eye = [33, 159, 158, 133, 153, 145]
         self.mouth = [78, 81, 13, 311, 308, 178, 14, 402]
-        
-    def _compute_ratio(self, landmarks, indices, horizontal_pairs, vertical_pairs):
-        width = np.linalg.norm(landmarks[indices[horizontal_pairs[0]]] - landmarks[indices[horizontal_pairs[1]]])
-        height = sum(np.linalg.norm(landmarks[indices[p1]] - landmarks[indices[p2]]) for p1, p2 in vertical_pairs) / len(vertical_pairs)
-        return height / width if width > 0 else 0.0
 
-    def process_frame(self, frame: np.ndarray) -> Optional[FrameMetrics]:
-        results = self.mp_face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    def _compute_distance(self, p1, p2):
+        return np.linalg.norm(np.array(p1) - np.array(p2))
+
+    def _compute_ear(self, landmarks, eye_indices):
+        h_dist = self._compute_distance(landmarks[eye_indices[0]], landmarks[eye_indices[3]])
+        v_dist1 = self._compute_distance(landmarks[eye_indices[1]], landmarks[eye_indices[5]])
+        v_dist2 = self._compute_distance(landmarks[eye_indices[2]], landmarks[eye_indices[4]])
+        if h_dist == 0:
+            return 0.0
+        return (v_dist1 + v_dist2) / (2.0 * h_dist)
+
+    def _compute_mar(self, landmarks):
+        h_dist = self._compute_distance(landmarks[78], landmarks[308])
+        v_dist = self._compute_distance(landmarks[13], landmarks[14])
+        if h_dist == 0:
+            return 0.0
+        return v_dist / h_dist
+
+    def process_frame(self, frame) -> Optional[FrameMetrics]:
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.mp_face_mesh.process(rgb_frame)
+        
         if not results.multi_face_landmarks:
             return None
             
-        mesh = results.multi_face_landmarks[0].landmark
-        h, w = frame.shape[:2]
-        landmarks = np.array([[p.x * w, p.y * h] for p in mesh])
+        face_landmarks = results.multi_face_landmarks[0]
+        h, w, _ = frame.shape
+        coords = {i: (int(lm.x * w), int(lm.y * h)) for i, lm in enumerate(face_landmarks.landmark)}
         
-        left_ear = self._compute_ratio(landmarks, self.left_eye, (0, 3), ((1, 5), (2, 4)))
-        right_ear = self._compute_ratio(landmarks, self.right_eye, (0, 3), ((1, 5), (2, 4)))
-        ear = (left_ear + right_ear) / 2.0
+        left_ear = self._compute_ear(coords, self.left_eye)
+        right_ear = self._compute_ear(coords, self.right_eye)
+        avg_ear = (left_ear + right_ear) / 2.0
+        mar = self._compute_mar(coords)
         
-        mar = self._compute_ratio(landmarks, self.mouth, (0, 4), ((1, 7), (2, 6), (3, 5)))
+        nose = coords[1]
+        left_cheek = coords[234]
+        right_cheek = coords[454]
+        top_head = coords[10]
+        bottom_chin = coords[152]
         
-        face_3d = np.array([
-            [0.0, 0.0, 0.0], [0.0, -330.0, -65.0], [-225.0, 170.0, -135.0],
-            [225.0, 170.0, -135.0], [-150.0, -150.0, -125.0], [150.0, -150.0, -125.0]
-        ], dtype=np.float64)
+        face_width = self._compute_distance(left_cheek, right_cheek)
+        face_height = self._compute_distance(top_head, bottom_chin)
         
-        face_2d = np.array([
-            landmarks[1], landmarks[152], landmarks[226], 
-            landmarks[446], landmarks[57], landmarks[287]
-        ], dtype=np.float64)
+        yaw = ((nose[0] - left_cheek[0]) / face_width - 0.5) * 100 if face_width > 0 else 0.0
+        pitch = ((nose[1] - top_head[1]) / face_height - 0.5) * 100 if face_height > 0 else 0.0
+        roll = 0.0
         
-        focal_length = 1 * w
-        cam_matrix = np.array([[focal_length, 0, w / 2], [0, focal_length, h / 2], [0, 0, 1]])
-        dist_coeffs = np.zeros((4, 1), dtype=np.float64)
-        
-        success, rot_vec, trans_vec = cv2.solvePnP(face_3d, face_2d, cam_matrix, dist_coeffs)
-        if not success:
-            return FrameMetrics(ear, mar, 0.0, 0.0, 0.0)
-            
-        rmat, _ = cv2.Rodrigues(rot_vec)
-        angles, _, _, _, _, _ = cv2.RQDecomp3x3(rmat)
-        
-        return FrameMetrics(ear, mar, angles[0] * 360, angles[1] * 360, angles[2] * 360)
+        return FrameMetrics(ear=avg_ear, mar=mar, pitch=pitch, yaw=yaw, roll=roll)
