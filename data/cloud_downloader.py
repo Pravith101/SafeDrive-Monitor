@@ -1,12 +1,14 @@
 import os
 import sys
+
+# 1. Override the cache location BEFORE importing kagglehub
+custom_cache_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "raw_dataset"))
+os.environ["KAGGLEHUB_CACHE_DIR"] = custom_cache_dir
+
 import kagglehub
 
 def download_dataset() -> str:
-    """
-    Downloads the MRL Eye Dataset via KaggleHub using environment variables.
-    Requires KAGGLE_USERNAME and KAGGLE_KEY to be set in the system environment.
-    """
+    # 2. Validate Credentials
     kaggle_user = os.environ.get("KAGGLE_USERNAME")
     kaggle_key = os.environ.get("KAGGLE_KEY")
 
@@ -15,9 +17,9 @@ def download_dataset() -> str:
         print("Please export KAGGLE_USERNAME and KAGGLE_KEY before executing.")
         sys.exit(1)
 
-    dataset_identifier = "mrl-dataset/mrl-eye-dataset"
+    dataset_identifier = "guanhualee/driver-activity-dataset"
     print(f"Authenticated as: {kaggle_user}")
-    print(f"Downloading dataset: {dataset_identifier}...")
+    print(f"Routing download to D drive: {custom_cache_dir}...")
 
     try:
         download_path = kagglehub.dataset_download(dataset_identifier)
