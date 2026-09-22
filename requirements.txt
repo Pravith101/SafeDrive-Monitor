@@ -1,5 +1,8 @@
-opencv-python
-mediapipe==0.10.9
-numpy
-torch
-kagglehub
+torch>=2.2.0
+torchvision>=0.17.0
+mediapipe>=0.10.9
+opencv-python>=4.9.0
+numpy>=1.26.0
+kagglehub>=0.2.0
+pillow>=10.2.0
+scikit-learn>=1.4.0
