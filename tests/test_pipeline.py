@@ -9,10 +9,12 @@ from data.preprocess_activity import contiguous_windows, grouped_split_indices, 
 from live_inference import load_model_artifacts
 from models.temporal_gru import TemporalGRU, CHECKPOINT_VERSION
 from models.driver_state_cnn import (CLASS_TO_ID, CHECKPOINT_FORMAT,
+                                     EYE_CLOSED_RATIO_THRESHOLD, EYE_GATE_VERSION,
                                      MOUTH_GATE_VERSION, MOUTH_OPEN_RATIO_THRESHOLD,
                                      DriverStateCNN, split_records)
 from live_inference import (load_driver_state_model, prepare_face_tensor,
-                            mouth_aperture_ratio, apply_mouth_consistency_gate,
+                            eye_aspect_ratio, mouth_aperture_ratio,
+                            apply_eye_consistency_gate, apply_mouth_consistency_gate,
                             predict_driver_state)
 from vision.extractor import VisionExtractor
 
@@ -141,7 +143,9 @@ def test_driver_state_checkpoint_round_trip_and_video_group_split(tmp_path):
                 "image_size": 64, "class_to_id": CLASS_TO_ID,
                 "normalization_mean": [0.5] * 3, "normalization_std": [0.5] * 3,
                 "mouth_gate_version": MOUTH_GATE_VERSION,
-                "mouth_open_ratio_threshold": MOUTH_OPEN_RATIO_THRESHOLD}, checkpoint_path)
+                "mouth_open_ratio_threshold": MOUTH_OPEN_RATIO_THRESHOLD,
+                "eye_gate_version": EYE_GATE_VERSION,
+                "eye_closed_ratio_threshold": EYE_CLOSED_RATIO_THRESHOLD}, checkpoint_path)
     loaded, _ = load_driver_state_model(checkpoint_path)
     landmarks = [type("Point", (), {"x": 0.5, "y": 0.5})() for _ in range(468)]
     for idx, (x, y) in zip((10, 152, 234, 454), ((.5, .2), (.5, .85), (.25, .5), (.75, .5))):
@@ -150,6 +154,12 @@ def test_driver_state_checkpoint_round_trip_and_video_group_split(tmp_path):
     landmarks[291].x, landmarks[291].y = .6, .6
     landmarks[13].x, landmarks[13].y = .5, .6
     landmarks[14].x, landmarks[14].y = .5, .6
+    for left, right in ((33, 133), (362, 263)):
+        landmarks[left].x, landmarks[left].y = .4, .5
+        landmarks[right].x, landmarks[right].y = .6, .5
+    for top, bottom in ((160, 144), (158, 153), (385, 380), (387, 373)):
+        landmarks[top].x, landmarks[top].y = .5, .5
+        landmarks[bottom].x, landmarks[bottom].y = .5, .5
     state, probabilities = predict_driver_state(
         loaded, np.zeros((480, 640, 3), dtype=np.uint8), landmarks)
     assert state in {"alert", "microsleep", "yawning", "uncertain"}
@@ -177,3 +187,19 @@ def test_mouth_opening_gate_abstains_on_closed_mouth_yawning_prediction():
     assert apply_mouth_consistency_gate("yawning", ratio) == "uncertain"
     assert apply_mouth_consistency_gate("yawning", .8) == "yawning"
     assert apply_mouth_consistency_gate("alert", ratio) == "alert"
+
+
+def test_eye_closure_gate_abstains_on_alert_with_closed_eyes():
+    landmarks = [type("Point", (), {"x": 0.5, "y": 0.5})() for _ in range(468)]
+    for left, right in ((33, 133), (362, 263)):
+        landmarks[left].x, landmarks[left].y = .4, .5
+        landmarks[right].x, landmarks[right].y = .6, .5
+    for top, bottom in ((160, 144), (158, 153), (385, 380), (387, 373)):
+        landmarks[top].x, landmarks[top].y = .5, .495
+        landmarks[bottom].x, landmarks[bottom].y = .5, .505
+    ratio = eye_aspect_ratio(landmarks, 100, 100)
+    assert ratio == pytest.approx(.05)
+    assert apply_eye_consistency_gate("alert", ratio) == "uncertain"
+    assert apply_eye_consistency_gate("microsleep", ratio) == "microsleep"
+    assert apply_eye_consistency_gate("alert", .3) == "alert"
+    assert apply_eye_consistency_gate("microsleep", .3) == "microsleep"

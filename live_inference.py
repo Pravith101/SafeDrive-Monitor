@@ -11,6 +11,7 @@ import argparse
 
 from models.temporal_gru import TemporalGRU, CHECKPOINT_VERSION
 from models.driver_state_cnn import (CHECKPOINT_FORMAT, ID_TO_CLASS, IMAGE_SIZE,
+                                     EYE_CLOSED_RATIO_THRESHOLD, EYE_GATE_VERSION,
                                      MOUTH_GATE_VERSION, MOUTH_OPEN_RATIO_THRESHOLD,
                                      DriverStateCNN)
 from vision.extractor import VisionExtractor
@@ -148,6 +149,12 @@ def load_driver_state_model(checkpoint_path: str | Path, device="cpu"):
     if (not isinstance(threshold, (float, int)) or not np.isfinite(threshold) or
             threshold <= 0):
         raise ValueError("Checkpoint is missing a valid calibrated mouth-opening threshold")
+    if checkpoint.get("eye_gate_version") != EYE_GATE_VERSION:
+        raise ValueError("Checkpoint is missing the compatible calibrated eye-closure gate")
+    eye_threshold = checkpoint.get("eye_closed_ratio_threshold")
+    if (not isinstance(eye_threshold, (float, int)) or not np.isfinite(eye_threshold) or
+            eye_threshold <= 0):
+        raise ValueError("Checkpoint is missing a valid calibrated eye-closure threshold")
     model = DriverStateCNN(num_classes=len(ID_TO_CLASS))
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     model.to(device).eval()
@@ -156,6 +163,7 @@ def load_driver_state_model(checkpoint_path: str | Path, device="cpu"):
         raise ValueError("Checkpoint contains an invalid class decision bias")
     model.decision_bias = torch.as_tensor(bias, dtype=torch.float32, device=device)
     model.mouth_open_ratio_threshold = float(threshold)
+    model.eye_closed_ratio_threshold = float(eye_threshold)
     return model, checkpoint
 
 
@@ -177,10 +185,43 @@ def mouth_aperture_ratio(landmarks, frame_width: int, frame_height: int) -> floa
     return aperture
 
 
+def eye_aspect_ratio(landmarks, frame_width: int, frame_height: int) -> float:
+    """Average the standard six-point eye aspect ratio for both eyes."""
+    if frame_width <= 0 or frame_height <= 0:
+        raise ValueError("Frame dimensions must be positive")
+
+    def point(index):
+        landmark = landmarks[index]
+        return np.asarray((landmark.x * frame_width, landmark.y * frame_height), dtype=np.float32)
+
+    def ratio(horizontal, vertical_a, vertical_b):
+        width = float(np.linalg.norm(point(horizontal[0]) - point(horizontal[1])))
+        if not np.isfinite(width) or width < 1.0:
+            raise ValueError("Eye landmarks are degenerate")
+        height_a = float(np.linalg.norm(point(vertical_a[0]) - point(vertical_a[1])))
+        height_b = float(np.linalg.norm(point(vertical_b[0]) - point(vertical_b[1])))
+        return (height_a + height_b) / (2.0 * width)
+
+    left = ratio((33, 133), (160, 144), (158, 153))
+    right = ratio((362, 263), (385, 380), (387, 373))
+    value = float((left + right) / 2.0)
+    if not np.isfinite(value):
+        raise ValueError("Eye aspect ratio is not finite")
+    return value
+
+
 def apply_mouth_consistency_gate(state: str, aperture_ratio: float,
                                  threshold: float = DEFAULT_MOUTH_OPEN_RATIO_THRESHOLD) -> str:
     """Abstain on yawning predictions without the validated open-mouth cue."""
     if state == "yawning" and aperture_ratio < threshold:
+        return "uncertain"
+    return state
+
+
+def apply_eye_consistency_gate(state: str, aspect_ratio: float,
+                                threshold: float = EYE_CLOSED_RATIO_THRESHOLD) -> str:
+    """Abstain from alert only for strong eye-closure evidence."""
+    if state == "alert" and aspect_ratio < threshold:
         return "uncertain"
     return state
 
@@ -216,6 +257,9 @@ def predict_driver_state(model, frame, landmarks, device="cpu"):
     aperture = mouth_aperture_ratio(landmarks, frame.shape[1], frame.shape[0])
     state = apply_mouth_consistency_gate(
         state, aperture, getattr(model, "mouth_open_ratio_threshold", DEFAULT_MOUTH_OPEN_RATIO_THRESHOLD))
+    state = apply_eye_consistency_gate(
+        state, eye_aspect_ratio(landmarks, frame.shape[1], frame.shape[0]),
+        getattr(model, "eye_closed_ratio_threshold", EYE_CLOSED_RATIO_THRESHOLD))
     return state, probabilities
 
 
@@ -244,15 +288,22 @@ def run_driver_state_monitor(camera_index: int = 0) -> None:
                         model, frame, result.multi_face_landmarks[0].landmark, device)
                     votes.append(probabilities)
                     averaged = np.mean(votes, axis=0)
-                    state = ID_TO_CLASS[str(int(averaged.argmax()))]
+                    raw_state = ID_TO_CLASS[str(int(averaged.argmax()))]
                     landmarks = result.multi_face_landmarks[0].landmark
                     aperture = mouth_aperture_ratio(landmarks, frame.shape[1], frame.shape[0])
                     state = apply_mouth_consistency_gate(
-                        state, aperture,
+                        raw_state, aperture,
                         getattr(model, "mouth_open_ratio_threshold", DEFAULT_MOUTH_OPEN_RATIO_THRESHOLD))
+                    state = apply_eye_consistency_gate(
+                        state, eye_aspect_ratio(landmarks, frame.shape[1], frame.shape[0]),
+                        getattr(model, "eye_closed_ratio_threshold", EYE_CLOSED_RATIO_THRESHOLD))
                     color = (0, 165, 255) if state == "uncertain" else (
                         (0, 0, 255) if state != "alert" else (0, 200, 0))
-                    message = "UNCERTAIN: mouth cue not confirmed" if state == "uncertain" else state.upper()
+                    if state == "uncertain":
+                        cue = "mouth cue absent" if raw_state == "yawning" else "eyes appear closed"
+                        message = f"UNCERTAIN: {cue}"
+                    else:
+                        message = state.upper()
                 except (ValueError, cv2.error, FloatingPointError):
                     votes.clear()
                     message, color = "Face crop unavailable", (0, 165, 255)
@@ -293,8 +344,13 @@ def run_image_inference(image_path: str | Path) -> None:
     raw_state = ID_TO_CLASS[str(int(probabilities.argmax()))]
     aperture = mouth_aperture_ratio(landmarks, frame.shape[1], frame.shape[0])
     state = apply_mouth_consistency_gate(raw_state, aperture, model.mouth_open_ratio_threshold)
+    eye_ratio = eye_aspect_ratio(landmarks, frame.shape[1], frame.shape[0])
+    state = apply_eye_consistency_gate(
+        state, eye_ratio, model.eye_closed_ratio_threshold)
     print(f"raw_model_prediction={raw_state}")
     print(f"mouth_aperture_ratio={aperture:.4f}; calibrated_threshold={model.mouth_open_ratio_threshold:.4f}")
+    print(f"eye_aspect_ratio={eye_ratio:.4f}; "
+          f"calibrated_threshold={model.eye_closed_ratio_threshold:.4f}")
     print(f"prediction={state}")
 
 

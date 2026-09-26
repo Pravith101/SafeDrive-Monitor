@@ -24,6 +24,8 @@ CHECKPOINT_FORMAT = "safedrive-fl3d-cnn-v1"
 SEED = 42
 MOUTH_GATE_VERSION = "mediapipe-468-inner-lip-ratio-v1"
 MOUTH_OPEN_RATIO_THRESHOLD = 0.2684476375579834
+EYE_GATE_VERSION = "mediapipe-six-point-ear-v1"
+EYE_CLOSED_RATIO_THRESHOLD = 0.12484410527134987
 
 
 class DriverStateCNN(nn.Module):
@@ -250,6 +252,8 @@ def main():
                   "normalization_mean": [0.5] * 3, "normalization_std": [0.5] * 3,
                   "mouth_gate_version": MOUTH_GATE_VERSION,
                   "mouth_open_ratio_threshold": MOUTH_OPEN_RATIO_THRESHOLD,
+                  "eye_gate_version": EYE_GATE_VERSION,
+                  "eye_closed_ratio_threshold": EYE_CLOSED_RATIO_THRESHOLD,
                   "best_epoch": best_epoch, "seed": SEED}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(checkpoint, args.output)

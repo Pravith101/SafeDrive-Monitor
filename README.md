@@ -41,9 +41,9 @@ python models/calibrate_mouth_gate.py --dataset-dir "data/downloaded/kaggle_cach
 python live_inference.py
 ```
 
-Press `q` in the camera window to quit. The live demo uses MediaPipe to crop a face and smooths predictions over nine frames. It no longer presents softmax as a confidence percentage. A CNN `yawning` prediction is shown as `UNCERTAIN` unless MediaPipe also measures an open-mouth cue above the threshold calibrated on the FL3D validation videos. Check one still image without a webcam using `python live_inference.py --image path\to\frame.jpg`; this prints both the raw CNN class and the gated result.
+Press `q` in the camera window to quit. The live demo uses MediaPipe to crop a face and smooths predictions over nine frames. It no longer presents softmax as a confidence percentage. A CNN `yawning` prediction is shown as `UNCERTAIN` unless MediaPipe also measures an open-mouth cue above the threshold calibrated on the FL3D validation videos. A CNN `alert` prediction is shown as `UNCERTAIN` when both eyes look strongly closed. Check one still image without a webcam using `python live_inference.py --image path\to\frame.jpg`; this prints the raw CNN class, measured cues, and gated result.
 
-This mouth cue is a consistency check, not proof that a person is yawning. It does not validate `alert` or `microsleep` predictions. The model was trained on night-time, face-cropped footage; daylight webcam performance and person-level generalization require separate validation.
+These visual cues are consistency checks, not diagnoses or proof of a state. The eye gate only withholds an `alert` result on strong eye-closure evidence; it does not reliably detect every microsleep. The model was trained on night-time, face-cropped footage; daylight webcam performance and person-level generalization require separate validation.
 
 Training writes ignored artifacts: `weights/driver_state_cnn.pth` and `weights/driver_state_evaluation.json`. The report contains exact split video IDs, class counts, validation metrics, test metrics, confusion matrix, and training hardware. No model weights or dataset files are tracked in Git.
 
@@ -60,9 +60,11 @@ Test per-class precision / recall / F1: alert **90.71 / 98.55 / 94.47%**; micros
 
 ### Yawning consistency check
 
-`models/calibrate_mouth_gate.py` samples up to 240 frames per class from the deterministic validation and held-out test video splits (seed 42). It measures MediaPipe inner-lip distance (landmarks 13–14) divided by mouth-corner distance (61–291), picks a threshold on validation for maximum precision while requiring at least 50% recall, then reports that frozen threshold on test. The calibrated threshold was **0.26845**. On the validation sample, 719/720 selected frames had a detected face; precision was **100.00%** and recall **92.08%**. On the separate test sample, 711/720 had a detected face; precision was **99.09%** and recall **90.42%** (2 false open-mouth detections among 471 non-yawning frames). These are mouth-cue measurements on sampled held-out videos, not the CNN’s three-class metrics.
+`models/calibrate_mouth_gate.py` samples up to 240 frames per class from deterministic validation and held-out test video splits (seed 42). For yawning it measures MediaPipe inner-lip distance (landmarks 13–14) divided by mouth-corner distance (61–291), picks a validation threshold for maximum precision with at least 50% recall, then scores that fixed threshold on test. The threshold was **0.26845**. Of 719 validation images with detected faces, precision was **100.00%** and recall **92.08%**. On 711 test images, precision was **99.09%** and recall **90.42%** (2 false open-mouth cues among 471 non-yawning frames).
 
-The supplied screenshot was also run through the same still-image inference path: the raw CNN predicted `yawning`, but its mouth ratio was **0.0020**, below the calibrated threshold, so the displayed result is now `uncertain`. This single example is a regression check, not an independent accuracy estimate.
+The same script calibrates an eye-closure threshold from alert and microsleep frames only. It uses the mean six-point eye aspect ratio for the two eyes. The threshold was **0.12484**. Of 479 validation images with detected faces, precision for the closed-eye cue was **99.32%** with **60.83%** recall. On 471 test images, precision was **100.00%** with only **22.32%** recall. This low test recall means many microsleep frames are missed; the cue only withholds an `alert` result when eyes are strongly closed. These sampled cue measurements are not the CNN’s three-class metrics.
+
+The supplied screenshots were run through the same still-image inference path. On the closed-eye frame, the raw CNN said `alert`, but its eye ratio was **0.0897**, below the calibrated threshold, so the result is `uncertain`. On the open-eye, closed-mouth frame, it said `yawning` with a mouth ratio of **0.0055**, so that result is also `uncertain`. These two examples are regression checks, not independent accuracy estimates.
 
 ## Tests
 

@@ -1,4 +1,4 @@
-"""Calibrate a yawning abstention gate from FL3D validation videos, then score held-out videos."""
+"""Calibrate visual consistency gates from FL3D validation videos, then score held-out videos."""
 from __future__ import annotations
 
 import argparse
@@ -14,8 +14,8 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from live_inference import mouth_aperture_ratio
-from models.driver_state_cnn import (CHECKPOINT_FORMAT, ID_TO_CLASS, MOUTH_GATE_VERSION,
+from live_inference import eye_aspect_ratio, mouth_aperture_ratio
+from models.driver_state_cnn import (CHECKPOINT_FORMAT, EYE_GATE_VERSION, MOUTH_GATE_VERSION,
                                      collect_records, split_records)
 
 SAMPLES_PER_CLASS = 240
@@ -42,23 +42,27 @@ def sample_apertures(records, indices, face_mesh, seed=42):
             landmarks = result.multi_face_landmarks[0].landmark
             try:
                 ratio = mouth_aperture_ratio(landmarks, frame.shape[1], frame.shape[0])
+                eye_ratio = eye_aspect_ratio(landmarks, frame.shape[1], frame.shape[0])
             except ValueError:
                 missing += 1
                 continue
-            output.append({"label": int(true_label), "ratio": ratio, "video": video})
+            output.append({"label": int(true_label), "ratio": ratio,
+                           "eye_ratio": eye_ratio, "video": video})
     return output, missing
 
 
-def gate_metrics(rows, threshold):
-    truth = np.asarray([row["label"] == 2 for row in rows], dtype=bool)
-    predicted = np.asarray([row["ratio"] >= threshold for row in rows], dtype=bool)
+def gate_metrics(rows, threshold, *, feature="ratio", positive_label=2, closed=False):
+    truth = np.asarray([row["label"] == positive_label for row in rows], dtype=bool)
+    values = np.asarray([row[feature] for row in rows], dtype=np.float64)
+    predicted = values <= threshold if closed else values >= threshold
     tp = int(np.sum(truth & predicted))
     fp = int(np.sum(~truth & predicted))
     positives = int(np.sum(truth))
     return {
         "samples_with_face": len(rows),
-        "true_yawning": positives,
-        "predicted_open_mouth": int(np.sum(predicted)),
+        "positive_class_id": positive_label,
+        "positive_class_samples": positives,
+        "cue_positive_predictions": int(np.sum(predicted)),
         "true_positive": tp,
         "false_positive": fp,
         "precision": float(tp / max(tp + fp, 1)),
@@ -66,11 +70,12 @@ def gate_metrics(rows, threshold):
     }
 
 
-def choose_threshold(validation_rows):
-    ratios = sorted({row["ratio"] for row in validation_rows})
+def choose_threshold(validation_rows, *, feature="ratio", positive_label=2, closed=False):
+    ratios = sorted({row[feature] for row in validation_rows})
     choices = []
     for threshold in ratios:
-        metrics = gate_metrics(validation_rows, threshold)
+        metrics = gate_metrics(validation_rows, threshold, feature=feature,
+                                positive_label=positive_label, closed=closed)
         if metrics["recall"] >= MIN_VALIDATION_RECALL:
             choices.append((metrics["precision"], metrics["recall"], threshold))
     if not choices:
@@ -101,10 +106,16 @@ def main():
         raise RuntimeError("MediaPipe could not measure mouth landmarks for the selected FL3D samples")
 
     threshold = choose_threshold(validation_rows)
+    eye_validation_rows = [row for row in validation_rows if row["label"] in (0, 1)]
+    eye_test_rows = [row for row in test_rows if row["label"] in (0, 1)]
+    eye_threshold = choose_threshold(eye_validation_rows, feature="eye_ratio",
+                                     positive_label=1, closed=True)
     report = {
         "dataset": "FL3D / Kaggle matjazmuc/frame-level-driver-drowsiness-detection-fl3d",
         "gate": MOUTH_GATE_VERSION,
         "definition": "distance(inner lip landmarks 13,14) / distance(mouth corners 61,291), in frame pixels",
+        "eye_gate": EYE_GATE_VERSION,
+        "eye_definition": "mean of each eye's standard six-point aspect ratio, landmarks 33/133 and 362/263",
         "sample_per_class_requested": SAMPLES_PER_CLASS,
         "sample_seed": 42,
         "validation_video_groups": sorted({row["video"] for row in validation_rows}),
@@ -115,8 +126,14 @@ def main():
         "threshold": threshold,
         "validation": gate_metrics(validation_rows, threshold),
         "test": gate_metrics(test_rows, threshold),
-        "interpretation": "The gate can abstain on a CNN yawning prediction when mouth opening is absent. "
-                         "It does not validate alert or microsleep predictions and is not safety-rated.",
+        "eye_closed_ratio_threshold": eye_threshold,
+        "eye_validation": gate_metrics(eye_validation_rows, eye_threshold, feature="eye_ratio",
+                                       positive_label=1, closed=True),
+        "eye_test": gate_metrics(eye_test_rows, eye_threshold, feature="eye_ratio",
+                                 positive_label=1, closed=True),
+        "interpretation": "The mouth cue can abstain on unsupported yawning predictions. The eye cue can abstain "
+                         "when alert/microsleep predictions conflict with measured eye openness. Neither cue is "
+                         "a continuous drowsiness detector; the system is not safety-rated.",
     }
 
     args.checkpoint = args.checkpoint.resolve()
@@ -127,11 +144,15 @@ def main():
         raise ValueError("Checkpoint is not a compatible SafeDrive FL3D CNN checkpoint")
     checkpoint["mouth_gate_version"] = MOUTH_GATE_VERSION
     checkpoint["mouth_open_ratio_threshold"] = float(threshold)
+    checkpoint["eye_gate_version"] = EYE_GATE_VERSION
+    checkpoint["eye_closed_ratio_threshold"] = float(eye_threshold)
     torch.save(checkpoint, args.checkpoint)
     report_path = args.checkpoint.with_name("driver_state_mouth_gate_evaluation.json")
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"threshold": threshold, "validation": report["validation"],
-                      "test": report["test"], "report": str(report_path)}, indent=2))
+    print(json.dumps({"mouth_threshold": threshold, "validation": report["validation"],
+                      "test": report["test"], "eye_threshold": eye_threshold,
+                      "eye_validation": report["eye_validation"], "eye_test": report["eye_test"],
+                      "report": str(report_path)}, indent=2))
 
 
 if __name__ == "__main__":
