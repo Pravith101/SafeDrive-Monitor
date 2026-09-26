@@ -1,9 +1,9 @@
-"""Create contiguous, video-grouped sequences and the training-only scaler."""
+"""Create contiguous, participant-grouped sequences and the training-only scaler."""
 from __future__ import annotations
 
 import json
+import argparse
 from itertools import chain
-import re
 import sys
 from pathlib import Path
 
@@ -19,18 +19,16 @@ sys.path.insert(0, str(ROOT))
 from vision.extractor import VisionExtractor
 
 FEATURES = VisionExtractor.FEATURES
-LABELS = {0: "safe / normal driving (activity a02)", 1: "drowsiness-related nodding (activity a10)"}
+# UTA-RLDD participant labels are encoded in video basenames: 0, 5, and 10.
+# This model deliberately uses only the alert and drowsy endpoints.
+LABELS = {0: "alert (UTA-RLDD label 0)", 1: "drowsy (UTA-RLDD label 10)"}
 SPLIT_SEED = 42
 VALIDATION_FRACTION = 0.2
-ACTIVITY_PATTERN = re.compile(r"(?:^|_)a(\d{2})(?:_|$)", re.IGNORECASE)
 
 
 def label_for_video(path: str | Path) -> int | None:
-    """Return the binary label for an exact activity token in a video name."""
-    match = ACTIVITY_PATTERN.search(Path(path).stem)
-    if not match:
-        return None
-    return {"02": 0, "10": 1}.get(match.group(1))
+    """Map verified UTA-RLDD filename labels; omit low vigilance (label 5)."""
+    return {"0": 0, "10": 1}.get(Path(path).stem)
 
 
 def contiguous_windows(frames: list, sequence_length: int, stride: int = 30) -> list:
@@ -56,16 +54,21 @@ def grouped_split_indices(groups: np.ndarray, labels: np.ndarray,
     train, validation = next(GroupShuffleSplit(n_splits=1, test_size=test_size,
                                                 random_state=seed).split(np.zeros(len(groups)), labels, groups))
     if set(np.unique(labels[train])) != {0, 1} or set(np.unique(labels[validation])) != {0, 1}:
-        raise ValueError("Video-level split must contain both classes in train and validation; provide more videos")
+        raise ValueError("Participant-level split must contain both classes in train and validation; "
+                         "provide more participants")
     return train, validation
 
 
 def process_activity_videos(dataset_dir: str | Path, sequence_length: int = 30, stride: int = 30) -> None:
     if sequence_length < 1 or stride < 1:
         raise ValueError("sequence_length and stride must be positive")
-    videos = sorted(p for p in Path(dataset_dir).rglob("*_rgb.mp4") if p.is_file()
-                    and label_for_video(p) is not None)
-    print(f"Found {len(videos)} videos for activities a02 (safe) and a10 (nodding).")
+    videos = sorted(p for p in Path(dataset_dir).rglob("*") if p.is_file()
+                    and p.suffix.lower() in {".mp4", ".mov"} and label_for_video(p) is not None)
+    if not videos:
+        raise RuntimeError("No UTA-RLDD endpoint videos found; expected files named 0 and 10 "
+                           "under participant folders. Label 5 (low vigilance) is excluded.")
+    print(f"Found {len(videos)} UTA-RLDD endpoint videos (labels 0=alert and 10=drowsy); "
+          "label 5 (low vigilance) is excluded.")
     sequences, labels, groups = [], [], []
     mesh = mp.solutions.face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
                                            min_detection_confidence=0.5)
@@ -94,13 +97,14 @@ def process_activity_videos(dataset_dir: str | Path, sequence_length: int = 30, 
             windows = contiguous_windows(runs, sequence_length, stride)
             sequences.extend(windows)
             labels.extend([label_for_video(path)] * len(windows))
-            groups.extend([path.stem] * len(windows))
+            # In UTA-RLDD the immediate parent is the participant ID (01..60).
+            groups.extend([path.parent.name] * len(windows))
             print(f"Processed {path.name}: {len(windows)} contiguous sequences")
     finally:
         mesh.close()
 
     if not sequences:
-        raise RuntimeError("No labeled sequences found; check dataset path and a02/a10 videos.")
+        raise RuntimeError("No labeled sequences found; check the UTA-RLDD path and videos named 0/10.")
     x = np.asarray(sequences, dtype=np.float32)
     y = np.asarray(labels, dtype=np.int64)
     group_ids = np.asarray(groups, dtype=str)
@@ -123,4 +127,10 @@ def process_activity_videos(dataset_dir: str | Path, sequence_length: int = 30, 
 
 
 if __name__ == "__main__":
-    process_activity_videos(ROOT / "data" / "raw_dataset")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset-dir", type=Path, default=ROOT / "data" / "raw_dataset",
+                        help="UTA-RLDD directory returned by KaggleHub (default: data/raw_dataset)")
+    parser.add_argument("--sequence-length", type=int, default=30)
+    parser.add_argument("--stride", type=int, default=30)
+    args = parser.parse_args()
+    process_activity_videos(args.dataset_dir, args.sequence_length, args.stride)

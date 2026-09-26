@@ -11,13 +11,13 @@ from vision.extractor import VisionExtractor
 
 
 @pytest.mark.parametrize(("name", "expected"), [
-    ("s01_o01_a02_rgb.mp4", 0),
-    ("clip_a10_rgb.mp4", 1),
-    ("clip_a020_rgb.mp4", None),
-    ("s01_o01_a11_rgb.mp4", None),
+    ("0.mov", 0),
+    ("10.MOV", 1),
+    ("5.mp4", None),
+    ("s01_o01_a02_rgb.mp4", None),
     ("not_a_video.txt", None),
 ])
-def test_activity_labels_use_exact_token(name, expected):
+def test_uta_rldd_labels_use_verified_filename_codes(name, expected):
     assert label_for_video(name) == expected
 
 
@@ -31,9 +31,9 @@ def test_window_parameters_must_be_positive():
         contiguous_windows([1, 2], 0)
 
 
-def test_group_split_keeps_videos_disjoint_and_classes_in_both_sides():
-    groups = np.repeat(["safe-a", "safe-b", "risk-a", "risk-b"], 2)
-    labels = np.repeat([0, 0, 1, 1], 2)
+def test_group_split_keeps_participants_disjoint_and_classes_in_both_sides():
+    groups = np.repeat(["participant-01", "participant-02", "participant-03", "participant-04"], 2)
+    labels = np.tile([0, 1], 4)
     train, validation = grouped_split_indices(groups, labels, test_size=0.5, seed=3)
     assert set(groups[train]).isdisjoint(groups[validation])
     assert set(labels[train]) == set(labels[validation]) == {0, 1}
@@ -88,6 +88,9 @@ def test_checkpoint_round_trip_and_incompatible_feature_order(tmp_path):
     assert window == 7
     assert loaded.training is False
     assert loaded_scaler.n_features_in_ == 5
+    with torch.inference_mode():
+        logits = loaded(torch.zeros(1, window, 5))
+    assert logits.shape == (1, 2)
 
     incompatible_scaler = StandardScaler().fit(np.arange(20, dtype=np.float32).reshape(4, 5) + 1)
     joblib.dump(incompatible_scaler, scaler_path)
