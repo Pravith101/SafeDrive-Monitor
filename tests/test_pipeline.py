@@ -9,8 +9,10 @@ from data.preprocess_activity import contiguous_windows, grouped_split_indices, 
 from live_inference import load_model_artifacts
 from models.temporal_gru import TemporalGRU, CHECKPOINT_VERSION
 from models.driver_state_cnn import (CLASS_TO_ID, CHECKPOINT_FORMAT,
+                                     MOUTH_GATE_VERSION, MOUTH_OPEN_RATIO_THRESHOLD,
                                      DriverStateCNN, split_records)
 from live_inference import (load_driver_state_model, prepare_face_tensor,
+                            mouth_aperture_ratio, apply_mouth_consistency_gate,
                             predict_driver_state)
 from vision.extractor import VisionExtractor
 
@@ -120,6 +122,10 @@ def test_driver_state_cnn_and_face_preprocessing_shapes():
     landmarks = [type("Point", (), {"x": 0.5, "y": 0.5})() for _ in range(468)]
     for idx, (x, y) in zip((10, 152, 234, 454), ((.5, .2), (.5, .85), (.25, .5), (.75, .5))):
         landmarks[idx].x, landmarks[idx].y = x, y
+    landmarks[61].x, landmarks[61].y = .4, .6
+    landmarks[291].x, landmarks[291].y = .6, .6
+    landmarks[13].x, landmarks[13].y = .5, .6
+    landmarks[14].x, landmarks[14].y = .5, .6
     tensor = prepare_face_tensor(np.zeros((480, 640, 3), dtype=np.uint8), landmarks)
     assert tensor.shape == (1, 3, 64, 64)
     model = DriverStateCNN()
@@ -133,14 +139,20 @@ def test_driver_state_checkpoint_round_trip_and_video_group_split(tmp_path):
     checkpoint_path = tmp_path / "driver_state.pth"
     torch.save({"format": CHECKPOINT_FORMAT, "state_dict": model.state_dict(),
                 "image_size": 64, "class_to_id": CLASS_TO_ID,
-                "normalization_mean": [0.5] * 3, "normalization_std": [0.5] * 3}, checkpoint_path)
+                "normalization_mean": [0.5] * 3, "normalization_std": [0.5] * 3,
+                "mouth_gate_version": MOUTH_GATE_VERSION,
+                "mouth_open_ratio_threshold": MOUTH_OPEN_RATIO_THRESHOLD}, checkpoint_path)
     loaded, _ = load_driver_state_model(checkpoint_path)
     landmarks = [type("Point", (), {"x": 0.5, "y": 0.5})() for _ in range(468)]
     for idx, (x, y) in zip((10, 152, 234, 454), ((.5, .2), (.5, .85), (.25, .5), (.75, .5))):
         landmarks[idx].x, landmarks[idx].y = x, y
+    landmarks[61].x, landmarks[61].y = .4, .6
+    landmarks[291].x, landmarks[291].y = .6, .6
+    landmarks[13].x, landmarks[13].y = .5, .6
+    landmarks[14].x, landmarks[14].y = .5, .6
     state, probabilities = predict_driver_state(
         loaded, np.zeros((480, 640, 3), dtype=np.uint8), landmarks)
-    assert state in {"alert", "microsleep", "yawning"}
+    assert state in {"alert", "microsleep", "yawning", "uncertain"}
     assert probabilities.shape == (3,)
     assert probabilities.sum() == pytest.approx(1.0)
 
@@ -151,3 +163,17 @@ def test_driver_state_checkpoint_round_trip_and_video_group_split(tmp_path):
     assert set(groups[train]).isdisjoint(groups[validation])
     assert set(groups[train]).isdisjoint(groups[test])
     assert set(groups[validation]).isdisjoint(groups[test])
+
+
+def test_mouth_opening_gate_abstains_on_closed_mouth_yawning_prediction():
+    landmarks = [type("Point", (), {"x": 0.5, "y": 0.5})() for _ in range(468)]
+    # 20 px mouth width and 1 px opening: 0.05, well below validation threshold.
+    landmarks[61].x, landmarks[61].y = .4, .5
+    landmarks[291].x, landmarks[291].y = .6, .5
+    landmarks[13].x, landmarks[13].y = .5, .495
+    landmarks[14].x, landmarks[14].y = .5, .505
+    ratio = mouth_aperture_ratio(landmarks, 100, 100)
+    assert ratio == pytest.approx(.05)
+    assert apply_mouth_consistency_gate("yawning", ratio) == "uncertain"
+    assert apply_mouth_consistency_gate("yawning", .8) == "yawning"
+    assert apply_mouth_consistency_gate("alert", ratio) == "alert"

@@ -22,6 +22,8 @@ CLASS_TO_ID = {"alert": 0, "microsleep": 1, "yawning": 2}
 ID_TO_CLASS = {str(v): k for k, v in CLASS_TO_ID.items()}
 CHECKPOINT_FORMAT = "safedrive-fl3d-cnn-v1"
 SEED = 42
+MOUTH_GATE_VERSION = "mediapipe-468-inner-lip-ratio-v1"
+MOUTH_OPEN_RATIO_THRESHOLD = 0.2684476375579834
 
 
 class DriverStateCNN(nn.Module):
@@ -246,6 +248,8 @@ def main():
     checkpoint = {"format": CHECKPOINT_FORMAT, "state_dict": best_state,
                   "image_size": IMAGE_SIZE, "class_to_id": CLASS_TO_ID,
                   "normalization_mean": [0.5] * 3, "normalization_std": [0.5] * 3,
+                  "mouth_gate_version": MOUTH_GATE_VERSION,
+                  "mouth_open_ratio_threshold": MOUTH_OPEN_RATIO_THRESHOLD,
                   "best_epoch": best_epoch, "seed": SEED}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(checkpoint, args.output)

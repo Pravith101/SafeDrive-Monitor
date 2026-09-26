@@ -37,10 +37,13 @@ Pass the KaggleHub path ending in `versions/1` to the trainer. The trainer reads
 ```powershell
 python models/driver_state_cnn.py --dataset-dir "data/downloaded/kaggle_cache/datasets/matjazmuc/frame-level-driver-drowsiness-detection-fl3d/versions/1"
 python models/calibrate_driver_state.py --dataset-dir "data/downloaded/kaggle_cache/datasets/matjazmuc/frame-level-driver-drowsiness-detection-fl3d/versions/1/classification_frames"
+python models/calibrate_mouth_gate.py --dataset-dir "data/downloaded/kaggle_cache/datasets/matjazmuc/frame-level-driver-drowsiness-detection-fl3d/versions/1"
 python live_inference.py
 ```
 
-Press `q` in the camera window to quit. The live demo uses MediaPipe to crop a face and smooths predictions over nine frames. The model was trained on night-time, face-cropped footage; daylight webcam performance and person-level generalization require separate validation.
+Press `q` in the camera window to quit. The live demo uses MediaPipe to crop a face and smooths predictions over nine frames. It no longer presents softmax as a confidence percentage. A CNN `yawning` prediction is shown as `UNCERTAIN` unless MediaPipe also measures an open-mouth cue above the threshold calibrated on the FL3D validation videos. Check one still image without a webcam using `python live_inference.py --image path\to\frame.jpg`; this prints both the raw CNN class and the gated result.
+
+This mouth cue is a consistency check, not proof that a person is yawning. It does not validate `alert` or `microsleep` predictions. The model was trained on night-time, face-cropped footage; daylight webcam performance and person-level generalization require separate validation.
 
 Training writes ignored artifacts: `weights/driver_state_cnn.pth` and `weights/driver_state_evaluation.json`. The report contains exact split video IDs, class counts, validation metrics, test metrics, confusion matrix, and training hardware. No model weights or dataset files are tracked in Git.
 
@@ -54,6 +57,12 @@ Run completed on the downloaded FL3D snapshot with seed `42`, 64×64 RGB input, 
 | Test (8 source videos) | 10,216 | 91.44% | 83.41% | 86.66% |
 
 Test per-class precision / recall / F1: alert **90.71 / 98.55 / 94.47%**; microsleep **92.54 / 55.51 / 69.40%**; yawning **96.07 / 96.16 / 96.12%**. Confusion matrix (rows = true class, columns = predicted class; order alert, microsleep, yawning): `[[7433, 73, 36], [721, 906, 5], [40, 0, 1002]]`. The lower microsleep recall means many microsleep frames were predicted alert; this model is not suitable as a safety-critical detector.
+
+### Yawning consistency check
+
+`models/calibrate_mouth_gate.py` samples up to 240 frames per class from the deterministic validation and held-out test video splits (seed 42). It measures MediaPipe inner-lip distance (landmarks 13–14) divided by mouth-corner distance (61–291), picks a threshold on validation for maximum precision while requiring at least 50% recall, then reports that frozen threshold on test. The calibrated threshold was **0.26845**. On the validation sample, 719/720 selected frames had a detected face; precision was **100.00%** and recall **92.08%**. On the separate test sample, 711/720 had a detected face; precision was **99.09%** and recall **90.42%** (2 false open-mouth detections among 471 non-yawning frames). These are mouth-cue measurements on sampled held-out videos, not the CNN’s three-class metrics.
+
+The supplied screenshot was also run through the same still-image inference path: the raw CNN predicted `yawning`, but its mouth ratio was **0.0020**, below the calibrated threshold, so the displayed result is now `uncertain`. This single example is a regression check, not an independent accuracy estimate.
 
 ## Tests
 

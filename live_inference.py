@@ -1,4 +1,4 @@
-"""Webcam inference using the preprocessing scaler and matching GRU checkpoint."""
+"""Webcam and still-image inference for the FL3D driver-state CNN."""
 from collections import deque
 from pathlib import Path
 
@@ -7,14 +7,17 @@ import joblib
 import mediapipe as mp
 import numpy as np
 import torch
+import argparse
 
 from models.temporal_gru import TemporalGRU, CHECKPOINT_VERSION
 from models.driver_state_cnn import (CHECKPOINT_FORMAT, ID_TO_CLASS, IMAGE_SIZE,
+                                     MOUTH_GATE_VERSION, MOUTH_OPEN_RATIO_THRESHOLD,
                                      DriverStateCNN)
 from vision.extractor import VisionExtractor
 
 ROOT = Path(__file__).resolve().parent
 FEATURES = VisionExtractor.FEATURES
+DEFAULT_MOUTH_OPEN_RATIO_THRESHOLD = MOUTH_OPEN_RATIO_THRESHOLD
 
 
 def load_model_artifacts(checkpoint_path: str | Path, scaler_path: str | Path, device="cpu"):
@@ -139,6 +142,12 @@ def load_driver_state_model(checkpoint_path: str | Path, device="cpu"):
     if (checkpoint.get("normalization_mean") != [0.5, 0.5, 0.5] or
             checkpoint.get("normalization_std") != [0.5, 0.5, 0.5]):
         raise ValueError("Checkpoint normalization metadata is incompatible")
+    if checkpoint.get("mouth_gate_version") != MOUTH_GATE_VERSION:
+        raise ValueError("Checkpoint is missing the compatible calibrated mouth-opening gate")
+    threshold = checkpoint.get("mouth_open_ratio_threshold")
+    if (not isinstance(threshold, (float, int)) or not np.isfinite(threshold) or
+            threshold <= 0):
+        raise ValueError("Checkpoint is missing a valid calibrated mouth-opening threshold")
     model = DriverStateCNN(num_classes=len(ID_TO_CLASS))
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     model.to(device).eval()
@@ -146,7 +155,34 @@ def load_driver_state_model(checkpoint_path: str | Path, device="cpu"):
     if bias.shape != (len(ID_TO_CLASS),) or not np.isfinite(bias).all():
         raise ValueError("Checkpoint contains an invalid class decision bias")
     model.decision_bias = torch.as_tensor(bias, dtype=torch.float32, device=device)
+    model.mouth_open_ratio_threshold = float(threshold)
     return model, checkpoint
+
+
+def mouth_aperture_ratio(landmarks, frame_width: int, frame_height: int) -> float:
+    """Measure inner-lip opening relative to mouth width in frame pixel space."""
+    if frame_width <= 0 or frame_height <= 0:
+        raise ValueError("Frame dimensions must be positive")
+
+    def point(index):
+        landmark = landmarks[index]
+        return np.asarray((landmark.x * frame_width, landmark.y * frame_height), dtype=np.float32)
+
+    mouth_width = float(np.linalg.norm(point(61) - point(291)))
+    if not np.isfinite(mouth_width) or mouth_width < 1.0:
+        raise ValueError("Mouth landmarks are degenerate")
+    aperture = float(np.linalg.norm(point(13) - point(14)) / mouth_width)
+    if not np.isfinite(aperture):
+        raise ValueError("Mouth aperture is not finite")
+    return aperture
+
+
+def apply_mouth_consistency_gate(state: str, aperture_ratio: float,
+                                 threshold: float = DEFAULT_MOUTH_OPEN_RATIO_THRESHOLD) -> str:
+    """Abstain on yawning predictions without the validated open-mouth cue."""
+    if state == "yawning" and aperture_ratio < threshold:
+        return "uncertain"
+    return state
 
 
 def prepare_face_tensor(frame, landmarks):
@@ -176,7 +212,11 @@ def predict_driver_state(model, frame, landmarks, device="cpu"):
     logits = model(tensor)[0] + getattr(model, "decision_bias", 0.0)
     probabilities = torch.softmax(logits, dim=0).cpu().numpy()
     label_id = int(probabilities.argmax())
-    return ID_TO_CLASS[str(label_id)], probabilities
+    state = ID_TO_CLASS[str(label_id)]
+    aperture = mouth_aperture_ratio(landmarks, frame.shape[1], frame.shape[0])
+    state = apply_mouth_consistency_gate(
+        state, aperture, getattr(model, "mouth_open_ratio_threshold", DEFAULT_MOUTH_OPEN_RATIO_THRESHOLD))
+    return state, probabilities
 
 
 def run_driver_state_monitor(camera_index: int = 0) -> None:
@@ -205,9 +245,14 @@ def run_driver_state_monitor(camera_index: int = 0) -> None:
                     votes.append(probabilities)
                     averaged = np.mean(votes, axis=0)
                     state = ID_TO_CLASS[str(int(averaged.argmax()))]
-                    confidence = float(averaged.max())
-                    color = (0, 0, 255) if state != "alert" else (0, 200, 0)
-                    message = f"{state.upper()} {confidence:.0%}"
+                    landmarks = result.multi_face_landmarks[0].landmark
+                    aperture = mouth_aperture_ratio(landmarks, frame.shape[1], frame.shape[0])
+                    state = apply_mouth_consistency_gate(
+                        state, aperture,
+                        getattr(model, "mouth_open_ratio_threshold", DEFAULT_MOUTH_OPEN_RATIO_THRESHOLD))
+                    color = (0, 165, 255) if state == "uncertain" else (
+                        (0, 0, 255) if state != "alert" else (0, 200, 0))
+                    message = "UNCERTAIN: mouth cue not confirmed" if state == "uncertain" else state.upper()
                 except (ValueError, cv2.error, FloatingPointError):
                     votes.clear()
                     message, color = "Face crop unavailable", (0, 165, 255)
@@ -226,5 +271,39 @@ def run_driver_state_monitor(camera_index: int = 0) -> None:
         cv2.destroyAllWindows()
 
 
+def run_image_inference(image_path: str | Path) -> None:
+    """Run the same face crop and consistency gate on one still image."""
+    image_path = Path(image_path)
+    frame = cv2.imread(str(image_path))
+    if frame is None:
+        raise FileNotFoundError(f"Could not read image: {image_path}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, _ = load_driver_state_model(ROOT / "weights/driver_state_cnn.pth", device)
+    with mp.solutions.face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
+                                         min_detection_confidence=0.5) as face_mesh:
+        result = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    if not result.multi_face_landmarks:
+        print("prediction=face_not_found")
+        return
+    landmarks = result.multi_face_landmarks[0].landmark
+    raw_tensor = prepare_face_tensor(frame, landmarks).to(device)
+    with torch.inference_mode():
+        logits = model(raw_tensor)[0] + getattr(model, "decision_bias", 0.0)
+        probabilities = torch.softmax(logits, dim=0).cpu().numpy()
+    raw_state = ID_TO_CLASS[str(int(probabilities.argmax()))]
+    aperture = mouth_aperture_ratio(landmarks, frame.shape[1], frame.shape[0])
+    state = apply_mouth_consistency_gate(raw_state, aperture, model.mouth_open_ratio_threshold)
+    print(f"raw_model_prediction={raw_state}")
+    print(f"mouth_aperture_ratio={aperture:.4f}; calibrated_threshold={model.mouth_open_ratio_threshold:.4f}")
+    print(f"prediction={state}")
+
+
 if __name__ == "__main__":
-    run_driver_state_monitor()
+    parser = argparse.ArgumentParser(description="SafeDrive FL3D CNN inference")
+    parser.add_argument("--image", type=Path, help="Run one still image without opening a webcam")
+    parser.add_argument("--camera", type=int, default=0, help="Webcam device index (default: 0)")
+    cli_args = parser.parse_args()
+    if cli_args.image:
+        run_image_inference(cli_args.image)
+    else:
+        run_driver_state_monitor(cli_args.camera)
