@@ -1,33 +1,27 @@
+"""Download the UTA-RLDD Kaggle mirror into the selected KaggleHub cache."""
 import os
-import sys
+from pathlib import Path
 
-# 1. Override the cache location BEFORE importing kagglehub
-custom_cache_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "raw_dataset"))
-os.environ["KAGGLEHUB_CACHE_DIR"] = custom_cache_dir
 
-import kagglehub
+DATASET = "rishab260/uta-reallife-drowsiness-dataset"
+
 
 def download_dataset() -> str:
-    # 2. Validate Credentials
-    kaggle_user = os.environ.get("KAGGLE_USERNAME")
-    kaggle_key = os.environ.get("KAGGLE_KEY")
-
-    if not kaggle_user or not kaggle_key:
-        print("[ERROR] Kaggle credentials missing.")
-        print("Please export KAGGLE_USERNAME and KAGGLE_KEY before executing.")
-        sys.exit(1)
-
-    dataset_identifier = "guanhualee/driver-activity-dataset"
-    print(f"Authenticated as: {kaggle_user}")
-    print(f"Routing download to D drive: {custom_cache_dir}...")
+    # Import only after honoring KaggleHub's cache override.
+    cache_dir = Path(os.environ.get("KAGGLEHUB_CACHE", Path(__file__).resolve().parent / "raw_dataset"))
+    os.environ["KAGGLEHUB_CACHE"] = str(cache_dir)
+    if os.environ.get("SAFEDRIVE_CONFIRM_LARGE_DOWNLOAD") != "1":
+        raise RuntimeError("UTA-RLDD is a very large download. Set SAFEDRIVE_CONFIRM_LARGE_DOWNLOAD=1 "
+                           "only when running on a machine with sufficient storage, or run this in a cloud VM.")
+    import kagglehub
 
     try:
-        download_path = kagglehub.dataset_download(dataset_identifier)
-        print(f"[SUCCESS] Dataset stored at: {download_path}")
-        return download_path
+        path = kagglehub.dataset_download(DATASET)
     except Exception as exc:
-        print(f"[ERROR] Failed to fetch dataset: {exc}")
-        sys.exit(1)
+        raise RuntimeError(f"Could not download Kaggle dataset {DATASET}: {exc}") from exc
+    print(f"Dataset downloaded to: {path}")
+    return path
+
 
 if __name__ == "__main__":
     download_dataset()
