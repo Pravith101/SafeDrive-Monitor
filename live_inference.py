@@ -9,6 +9,8 @@ import numpy as np
 import torch
 
 from models.temporal_gru import TemporalGRU, CHECKPOINT_VERSION
+from models.driver_state_cnn import (CHECKPOINT_FORMAT, ID_TO_CLASS, IMAGE_SIZE,
+                                     DriverStateCNN)
 from vision.extractor import VisionExtractor
 
 ROOT = Path(__file__).resolve().parent
@@ -119,5 +121,110 @@ def run_live_monitor(camera_index: int = 0) -> None:
         cv2.destroyAllWindows()
 
 
+def load_driver_state_model(checkpoint_path: str | Path, device="cpu"):
+    """Load the trained FL3D frame classifier used by the current webcam demo."""
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Missing driver-state checkpoint: {checkpoint_path}. "
+                                "Run models/driver_state_cnn.py first.")
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != CHECKPOINT_FORMAT:
+        raise ValueError("Checkpoint is not a compatible SafeDrive FL3D CNN checkpoint")
+    if checkpoint.get("image_size") != IMAGE_SIZE or checkpoint.get("class_to_id") != {
+            "alert": 0, "microsleep": 1, "yawning": 2}:
+        raise ValueError("Checkpoint image size or class map is incompatible")
+    if (checkpoint.get("normalization_mean") != [0.5, 0.5, 0.5] or
+            checkpoint.get("normalization_std") != [0.5, 0.5, 0.5]):
+        raise ValueError("Checkpoint normalization metadata is incompatible")
+    model = DriverStateCNN(num_classes=len(ID_TO_CLASS))
+    model.load_state_dict(checkpoint["state_dict"], strict=True)
+    model.to(device).eval()
+    bias = np.asarray(checkpoint.get("decision_bias", [0.0, 0.0, 0.0]), dtype=np.float32)
+    if bias.shape != (len(ID_TO_CLASS),) or not np.isfinite(bias).all():
+        raise ValueError("Checkpoint contains an invalid class decision bias")
+    model.decision_bias = torch.as_tensor(bias, dtype=torch.float32, device=device)
+    return model, checkpoint
+
+
+def prepare_face_tensor(frame, landmarks):
+    """Crop and normalize a detected face to the FL3D classifier input."""
+    height, width = frame.shape[:2]
+    points = np.asarray([(point.x * width, point.y * height) for point in landmarks], dtype=np.float32)
+    x_min, y_min = points.min(axis=0)
+    x_max, y_max = points.max(axis=0)
+    face_width, face_height = max(x_max - x_min, 1), max(y_max - y_min, 1)
+    x_min = max(0, int(x_min - face_width * 0.12))
+    x_max = min(width, int(x_max + face_width * 0.12))
+    y_min = max(0, int(y_min - face_height * 0.10))
+    y_max = min(height, int(y_max + face_height * 0.12))
+    crop = frame[y_min:y_max, x_min:x_max]
+    if crop.size == 0:
+        raise ValueError("Face landmarks do not overlap the camera frame")
+    rgb = cv2.cvtColor(cv2.resize(crop, (IMAGE_SIZE, IMAGE_SIZE), interpolation=cv2.INTER_AREA),
+                       cv2.COLOR_BGR2RGB)
+    array = rgb.astype(np.float32) / 255.0
+    array = (array - 0.5) / 0.5
+    return torch.from_numpy(array).permute(2, 0, 1).unsqueeze(0).contiguous()
+
+
+@torch.inference_mode()
+def predict_driver_state(model, frame, landmarks, device="cpu"):
+    tensor = prepare_face_tensor(frame, landmarks).to(device)
+    logits = model(tensor)[0] + getattr(model, "decision_bias", 0.0)
+    probabilities = torch.softmax(logits, dim=0).cpu().numpy()
+    label_id = int(probabilities.argmax())
+    return ID_TO_CLASS[str(label_id)], probabilities
+
+
+def run_driver_state_monitor(camera_index: int = 0) -> None:
+    """Run face-frame classification on webcam video with a short vote smoother."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, _ = load_driver_state_model(ROOT / "weights/driver_state_cnn.pth", device)
+    from collections import deque
+    votes = deque(maxlen=9)
+    cap = None
+    face_mesh = None
+    try:
+        face_mesh = mp.solutions.face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
+                                                    min_detection_confidence=0.5)
+        cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open webcam index {camera_index}.")
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            result = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            if result.multi_face_landmarks:
+                try:
+                    state, probabilities = predict_driver_state(
+                        model, frame, result.multi_face_landmarks[0].landmark, device)
+                    votes.append(probabilities)
+                    averaged = np.mean(votes, axis=0)
+                    state = ID_TO_CLASS[str(int(averaged.argmax()))]
+                    confidence = float(averaged.max())
+                    color = (0, 0, 255) if state != "alert" else (0, 200, 0)
+                    message = f"{state.upper()} {confidence:.0%}"
+                except (ValueError, cv2.error, FloatingPointError):
+                    votes.clear()
+                    message, color = "Face crop unavailable", (0, 165, 255)
+            else:
+                votes.clear()
+                message, color = "Face lost", (0, 165, 255)
+            cv2.putText(frame, message, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+            cv2.imshow("SafeDrive Monitor (FL3D CNN)", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    finally:
+        if cap is not None:
+            cap.release()
+        if face_mesh is not None:
+            face_mesh.close()
+        cv2.destroyAllWindows()
+
+
 if __name__ == "__main__":
-    run_live_monitor()
+    run_driver_state_monitor()

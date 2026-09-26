@@ -1,4 +1,4 @@
-"""Train and evaluate the SafeDrive temporal GRU on preprocessed arrays."""
+"""Legacy UTA-RLDD endpoint GRU; the current FL3D model is driver_state_cnn.py."""
 from pathlib import Path
 import json
 import random

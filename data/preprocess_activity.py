@@ -1,4 +1,4 @@
-"""Create contiguous, participant-grouped sequences and the training-only scaler."""
+"""Legacy UTA-RLDD GRU preprocessor; current FL3D workflow is models/driver_state_cnn.py."""
 from __future__ import annotations
 
 import json

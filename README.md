@@ -1,18 +1,18 @@
 # SafeDrive Monitor
 
-A research prototype that extracts facial geometry from video, scales frame features, and classifies 30-frame sequences with a PyTorch GRU. This is not a certified driver-safety system and should not be used as the sole basis for driving decisions.
+A research prototype that estimates driver state from a face crop using a small convolutional neural network. Its three labels are **alert**, **microsleep**, and **yawning**. This is not a certified driver-safety system and must not be used as the sole basis for driving decisions.
 
-## Dataset and verified class mapping
+## Dataset, labels, and license
 
-The intended dataset is the [UTA Real-Life Drowsiness Dataset (UTA-RLDD)](https://sites.google.com/view/utarldd/home), distributed through the [Kaggle mirror](https://www.kaggle.com/datasets/rishab260/uta-reallife-drowsiness-dataset). UTA's maintainers describe 180 RGB videos from 60 people, one participant-reported video per person for each state. The official labels are **0 = alert**, **5 = low vigilance**, and **10 = drowsy**. The Kaggle mirror's file manifest confirms files named `0.mov`/`0.mp4`, `5.*`, and `10.*` under participant-ID folders. Kaggle metadata reports **CC0: Public Domain** for the mirror. Cite Ghoddoosian et al., *A Realistic Dataset and Baseline Temporal Model for Early Drowsiness Detection* (CVPR Workshops 2019), as requested by the dataset maintainers.
+The project trains on [FL3D (Frame Level Driver Drowsiness Detection)](https://www.kaggle.com/datasets/matjazmuc/frame-level-driver-drowsiness-detection-fl3d), a frame-labeled derivative of the [NITYMED night-time driver dataset](https://datasets.esdalab.ece.uop.gr/). The FL3D Kaggle dataset is about **645 MB** and declares **CC BY-SA 4.0**. Attribute the FL3D dataset author and the NITYMED authors, preserve the license for distributed adaptations, and cite the referenced dataset work before reuse or redistribution.
 
-This GRU is a binary endpoint experiment: model class `0` is alert (dataset label `0`), and model class `1` is drowsy (dataset label `10`). Dataset label `5` (low vigilance) is excluded, not relabeled. This is not a three-class model and its output is not a complete vigilance assessment.
+FL3D defines three frame labels: `alert`, `microsleep`, and `yawning`. Its annotations mark closed-eye frames in microsleep sessions as `microsleep`, and wide-open-mouth frames in yawning sessions as `yawning`; blink frames are omitted. These are observable event labels, not medical diagnoses or a continuous drowsiness rating. A `microsleep` or `yawning` prediction is a warning cue; `alert` means only that the current frame resembles the dataset's alert class.
 
-The corpus is large: UTA's page reports 111.3 GB and Kaggle metadata reports about 96.6 GB. Do not download it to a normal local drive. Use a cloud VM with sufficient storage. The downloader requires explicit opt-in. Preprocessing supports the Kaggle layout where the immediate parent of each video is its participant ID; it selects only videos whose basename is exactly `0` or `10`. The pre-existing development-workspace folder `data/raw_dataset/DriverActivityDataset` does not match this layout and its provenance is unverified, so it must not be used as UTA-RLDD.
+The Kaggle release contains 53,331 face-cropped JPEG frames in 44 source-video folders with `annotations_final.json`. Two annotation entries without a usable class/image are skipped. The archived Kaggle split is not used: this workflow assigns complete source-video folders to about 60% train, 21% validation, and 19% test partitions with `StratifiedGroupKFold` (seed 42). No source video appears in more than one partition. The downloaded archive does not provide a reliable participant ID for every frame, so person-level separation across different videos cannot be independently guaranteed. Reported test metrics are held-out-video results, not a verified cross-subject benchmark.
 
-## Requirements and setup
+## Setup and download
 
-Use Python 3.10 or 3.11 for MediaPipe compatibility. Training can run on CPU; a supported CUDA/PyTorch setup is optional. Webcam inference needs a working camera and GUI display.
+Use Python 3.10 or 3.11 for MediaPipe compatibility.
 
 ```powershell
 py -3.11 -m venv .venv
@@ -21,32 +21,39 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-On macOS/Linux, create and activate `.venv` with the platform's normal `python3.11 -m venv .venv` and `source .venv/bin/activate` commands.
-
-## Dataset acquisition and pipeline
-
-Only download the full corpus on a cloud machine with enough storage. Configure Kaggle credentials using Kaggle's supported local credential file or environment variables; never commit credentials. Set `KAGGLEHUB_CACHE` to a cloud volume if needed. For an intentional download:
+The dataset download is optional but requires explicit opt-in. Files are stored under the ignored `data/downloaded/` directory, separate from any existing raw data.
 
 ```powershell
-$env:SAFEDRIVE_CONFIRM_LARGE_DOWNLOAD = "1"
+$env:SAFEDRIVE_CONFIRM_DATASET_DOWNLOAD = "1"
 python data/cloud_downloader.py
 ```
 
-The default KaggleHub cache is `data/raw_dataset/`. The downloader does not unpack or process the dataset. Preprocess the directory returned by KaggleHub (use `data/raw_dataset/` if that is where it was cached):
+KaggleHub prints the returned dataset path. The default cache is `data/downloaded/kaggle_cache/`.
+
+## Preprocess, train, evaluate, and run the camera demo
+
+Pass the KaggleHub path ending in `versions/1` to the trainer. The trainer reads labels and frame-to-video grouping from each `classification_frames/*/annotations_final.json` file, creates disjoint video-group splits, trains with balanced sampling across class/video groups, selects the checkpoint by validation macro-F1, then evaluates the held-out test videos once.
 
 ```powershell
-python data/preprocess_activity.py --dataset-dir "<KaggleHub returned directory>"
-python models/temporal_gru.py
+python models/driver_state_cnn.py --dataset-dir "data/downloaded/kaggle_cache/datasets/matjazmuc/frame-level-driver-drowsiness-detection-fl3d/versions/1"
+python models/calibrate_driver_state.py --dataset-dir "data/downloaded/kaggle_cache/datasets/matjazmuc/frame-level-driver-drowsiness-detection-fl3d/versions/1/classification_frames"
 python live_inference.py
 ```
 
-Press `q` in the webcam window to quit. `python test_demo.py` remains a compatibility alias for the same live command. Each missed or invalid face breaks the frame run, so no training sequence crosses a detection gap; live inference also clears its rolling window when the face is lost. Preprocessing uses a 30-frame stride by default. All videos from a participant stay in one deterministic train/validation partition (seed `42`, 20% validation); the StandardScaler is fitted only on training participants. Both partitions must contain both endpoint labels.
+Press `q` in the camera window to quit. The live demo uses MediaPipe to crop a face and smooths predictions over nine frames. The model was trained on night-time, face-cropped footage; daylight webcam performance and person-level generalization require separate validation.
 
-## Features and artifacts
+Training writes ignored artifacts: `weights/driver_state_cnn.pth` and `weights/driver_state_evaluation.json`. The report contains exact split video IDs, class counts, validation metrics, test metrics, confusion matrix, and training hardware. No model weights or dataset files are tracked in Git.
 
-Each frame has five ordered features: **EAR, MAR, pitch, yaw, roll**. Pose pitch and yaw come from OpenCV `solvePnP` using six canonical FaceMesh points and a documented approximate face model; roll is the eye-line angle. Angles are in degrees. The same extractor and feature order are used for preprocessing and webcam inference.
+## Verified training run
 
-Preprocessing writes ignored local files to `data/processed/`: `sequences.npy`, `labels.npy`, `groups.npy`, `feature_scaler.joblib`, and `metadata.json`. Training saves `weights/temporal_gru.pth` with the architecture, window length, class map, feature order, scaler parameters, and participant-level validation accuracy. Live inference checks these fields and the scaler feature count before opening the camera. The validation partition is not an independent test set; UTA-RLDD maintainers recommend five-fold evaluation by participant for comparable research results. Re-run preprocessing and training together after changing features, labels, sequence length, or split settings.
+Run completed on the downloaded FL3D snapshot with seed `42`, 64×64 RGB input, class/video-balanced sampling, batch size `256`, and eight epochs. Hardware was CPU-only (`torch 2.13.0+cpu`; CUDA unavailable). The best validation checkpoint was epoch 7. The participant ID limitation above applies to these measurements.
+
+| Held-out split | Frames | Accuracy | Balanced accuracy | Macro-F1 |
+| --- | ---: | ---: | ---: | ---: |
+| Validation (8 source videos) | 11,368 | 95.63% | 94.09% | 93.83% |
+| Test (8 source videos) | 10,216 | 91.44% | 83.41% | 86.66% |
+
+Test per-class precision / recall / F1: alert **90.71 / 98.55 / 94.47%**; microsleep **92.54 / 55.51 / 69.40%**; yawning **96.07 / 96.16 / 96.12%**. Confusion matrix (rows = true class, columns = predicted class; order alert, microsleep, yawning): `[[7433, 73, 36], [721, 906, 5], [40, 0, 1002]]`. The lower microsleep recall means many microsleep frames were predicted alert; this model is not suitable as a safety-critical detector.
 
 ## Tests
 
@@ -54,4 +61,4 @@ Preprocessing writes ignored local files to `data/processed/`: `sequences.npy`, 
 python -m pytest -q
 ```
 
-The test suite uses small synthetic values and temporary artifacts; it does not need the full dataset, network, webcam, or GPU. No real-data training results are reported until UTA-RLDD has been processed and evaluated; synthetic tests are not model-quality evidence. No pretrained checkpoint is included.
+Tests use synthetic inputs and do not need the dataset, network, camera, or GPU. Model-quality claims must come from the evaluation report produced by training, not from synthetic tests.

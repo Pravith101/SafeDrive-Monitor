@@ -12,6 +12,7 @@ safedrive_env/
 
 # Dataset, processed outputs, model checkpoints and local caches
 data/raw_dataset/
+data/downloaded/
 data/processed/
 weights/
 pip_temp/

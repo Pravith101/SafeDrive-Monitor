@@ -1,18 +1,18 @@
-"""Download the UTA-RLDD Kaggle mirror into the selected KaggleHub cache."""
+"""Download the compact, frame-labeled FL3D driver-state dataset from Kaggle."""
 import os
 from pathlib import Path
 
 
-DATASET = "rishab260/uta-reallife-drowsiness-dataset"
+DATASET = "matjazmuc/frame-level-driver-drowsiness-detection-fl3d"
 
 
 def download_dataset() -> str:
     # Import only after honoring KaggleHub's cache override.
-    cache_dir = Path(os.environ.get("KAGGLEHUB_CACHE", Path(__file__).resolve().parent / "raw_dataset"))
+    cache_dir = Path(os.environ.get("KAGGLEHUB_CACHE", Path(__file__).resolve().parent / "downloaded" / "kaggle_cache"))
     os.environ["KAGGLEHUB_CACHE"] = str(cache_dir)
-    if os.environ.get("SAFEDRIVE_CONFIRM_LARGE_DOWNLOAD") != "1":
-        raise RuntimeError("UTA-RLDD is a very large download. Set SAFEDRIVE_CONFIRM_LARGE_DOWNLOAD=1 "
-                           "only when running on a machine with sufficient storage, or run this in a cloud VM.")
+    if os.environ.get("SAFEDRIVE_CONFIRM_DATASET_DOWNLOAD") != "1":
+        raise RuntimeError("FL3D is a ~645 MB dataset. Set SAFEDRIVE_CONFIRM_DATASET_DOWNLOAD=1 "
+                           "to confirm the download and local storage use.")
     import kagglehub
 
     try:

@@ -2,12 +2,19 @@ import numpy as np
 import pytest
 import torch
 import math
+from pathlib import Path
 from sklearn.preprocessing import StandardScaler
 
 from data.preprocess_activity import contiguous_windows, grouped_split_indices, label_for_video
 from live_inference import load_model_artifacts
 from models.temporal_gru import TemporalGRU, CHECKPOINT_VERSION
+from models.driver_state_cnn import (CLASS_TO_ID, CHECKPOINT_FORMAT,
+                                     DriverStateCNN, split_records)
+from live_inference import (load_driver_state_model, prepare_face_tensor,
+                            predict_driver_state)
 from vision.extractor import VisionExtractor
+
+torch.set_num_threads(min(4, torch.get_num_threads()))
 
 
 @pytest.mark.parametrize(("name", "expected"), [
@@ -107,3 +114,40 @@ def test_checkpoint_round_trip_and_incompatible_feature_order(tmp_path):
 def test_missing_checkpoint_has_actionable_error(tmp_path):
     with pytest.raises(FileNotFoundError, match="Missing model checkpoint"):
         load_model_artifacts(tmp_path / "absent.pth", tmp_path / "scaler.joblib")
+
+
+def test_driver_state_cnn_and_face_preprocessing_shapes():
+    landmarks = [type("Point", (), {"x": 0.5, "y": 0.5})() for _ in range(468)]
+    for idx, (x, y) in zip((10, 152, 234, 454), ((.5, .2), (.5, .85), (.25, .5), (.75, .5))):
+        landmarks[idx].x, landmarks[idx].y = x, y
+    tensor = prepare_face_tensor(np.zeros((480, 640, 3), dtype=np.uint8), landmarks)
+    assert tensor.shape == (1, 3, 64, 64)
+    model = DriverStateCNN()
+    with torch.inference_mode():
+        logits = model(tensor)
+    assert logits.shape == (1, 3)
+
+
+def test_driver_state_checkpoint_round_trip_and_video_group_split(tmp_path):
+    model = DriverStateCNN()
+    checkpoint_path = tmp_path / "driver_state.pth"
+    torch.save({"format": CHECKPOINT_FORMAT, "state_dict": model.state_dict(),
+                "image_size": 64, "class_to_id": CLASS_TO_ID,
+                "normalization_mean": [0.5] * 3, "normalization_std": [0.5] * 3}, checkpoint_path)
+    loaded, _ = load_driver_state_model(checkpoint_path)
+    landmarks = [type("Point", (), {"x": 0.5, "y": 0.5})() for _ in range(468)]
+    for idx, (x, y) in zip((10, 152, 234, 454), ((.5, .2), (.5, .85), (.25, .5), (.75, .5))):
+        landmarks[idx].x, landmarks[idx].y = x, y
+    state, probabilities = predict_driver_state(
+        loaded, np.zeros((480, 640, 3), dtype=np.uint8), landmarks)
+    assert state in {"alert", "microsleep", "yawning"}
+    assert probabilities.shape == (3,)
+    assert probabilities.sum() == pytest.approx(1.0)
+
+    records = [(Path(f"{video}-{label}.jpg"), label, video)
+               for video in range(15) for label in range(3)]
+    train, validation, test = split_records(records)
+    groups = np.array([row[2] for row in records])
+    assert set(groups[train]).isdisjoint(groups[validation])
+    assert set(groups[train]).isdisjoint(groups[test])
+    assert set(groups[validation]).isdisjoint(groups[test])
