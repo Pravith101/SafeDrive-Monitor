@@ -2,6 +2,14 @@
 
 A research prototype that estimates driver state from a face crop using a small convolutional neural network. Its three labels are **alert**, **microsleep**, and **yawning**. This is not a certified driver-safety system and must not be used as the sole basis for driving decisions.
 
+## Alternative dataset: UTA-RLDD cloud workflow
+
+The FL3D results below did not generalize well for microsleep detection. The repository now includes a Google Colab workflow for the **UTA Real-Life Drowsiness Dataset (UTA-RLDD)** in [`models/cloud_training.ipynb`](models/cloud_training.ipynb). UTA-RLDD contains about 30 hours of video from 60 participants, with alert, low-vigilance, and drowsy recordings for each person. Its official download is about 111 GB, so place the extracted dataset in Google Drive before starting the notebook. The UTA-RLDD authors recommend participant-level five-fold evaluation and request citation of Ghoddoosian et al. (CVPR Workshops 2019).
+
+This alternate pipeline samples one frame per second, extracts facial motion cues, and trains the existing temporal GRU on cloud GPU. The current label mapping trains alert versus drowsy and omits low-vigilance recordings; it is a separate endpoint model from the FL3D three-class face-crop CNN. The split keeps participant folders disjoint between training and validation. After the notebook writes its artifacts, copy `temporal_gru.pth` to `weights/` and its matching `feature_scaler.joblib` to `data/processed/`, then run `python live_inference.py --temporal`.
+
+The official videos total about 111 GB and extraction can take hours even on a cloud runtime because video decoding and MediaPipe landmark extraction run on CPU. The notebook checks that a GPU is enabled for model training. It saves artifacts to Drive so they survive the temporary Colab session.
+
 ## Dataset, labels, and license
 
 The project trains on [FL3D (Frame Level Driver Drowsiness Detection)](https://www.kaggle.com/datasets/matjazmuc/frame-level-driver-drowsiness-detection-fl3d), a frame-labeled derivative of the [NITYMED night-time driver dataset](https://datasets.esdalab.ece.uop.gr/). The FL3D Kaggle dataset is about **645 MB** and declares **CC BY-SA 4.0**. Attribute the FL3D dataset author and the NITYMED authors, preserve the license for distributed adaptations, and cite the referenced dataset work before reuse or redistribution.

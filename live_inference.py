@@ -8,6 +8,7 @@ import mediapipe as mp
 import numpy as np
 import torch
 import argparse
+import time
 
 from models.temporal_gru import TemporalGRU, CHECKPOINT_VERSION
 from models.driver_state_cnn import (CHECKPOINT_FORMAT, ID_TO_CLASS, IMAGE_SIZE,
@@ -44,6 +45,9 @@ def load_model_artifacts(checkpoint_path: str | Path, scaler_path: str | Path, d
         if not isinstance(value, int) or value < 1:
             raise ValueError(f"Checkpoint has invalid {key}")
     sequence_length = checkpoint["sequence_length"]
+    sample_fps = checkpoint.get("sample_fps", 1.0)
+    if not isinstance(sample_fps, (int, float)) or not np.isfinite(sample_fps) or sample_fps <= 0:
+        raise ValueError("Checkpoint has invalid sample_fps")
     labels = checkpoint.get("labels")
     if not isinstance(labels, dict) or set(labels) != {"0", "1"} or not all(
             isinstance(text, str) and text.strip() for text in labels.values()):
@@ -79,6 +83,8 @@ def run_live_monitor(camera_index: int = 0) -> None:
     model, scaler, window, checkpoint = load_model_artifacts(
         ROOT / "weights/temporal_gru.pth", ROOT / "data/processed/feature_scaler.joblib", device)
     buffer = deque(maxlen=window)
+    sample_fps = float(checkpoint.get("sample_fps", 1.0))
+    last_sample = 0.0
     cap = None
     face_mesh = None
     try:
@@ -98,8 +104,11 @@ def run_live_monitor(camera_index: int = 0) -> None:
             if result.multi_face_landmarks:
                 h, w = frame.shape[:2]
                 try:
-                    metrics = extractor.extract_metrics(result.multi_face_landmarks[0].landmark, w, h)
-                    buffer.append([getattr(metrics, feature) for feature in FEATURES])
+                    now = time.monotonic()
+                    if now - last_sample >= 1.0 / sample_fps:
+                        metrics = extractor.extract_metrics(result.multi_face_landmarks[0].landmark, w, h)
+                        buffer.append([getattr(metrics, feature) for feature in FEATURES])
+                        last_sample = now
                     if len(buffer) == window:
                         raw = np.asarray(buffer, dtype=np.float32)
                         scaled = scaler.transform(raw).astype(np.float32)
@@ -355,11 +364,15 @@ def run_image_inference(image_path: str | Path) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="SafeDrive FL3D CNN inference")
+    parser = argparse.ArgumentParser(description="SafeDrive webcam inference")
     parser.add_argument("--image", type=Path, help="Run one still image without opening a webcam")
     parser.add_argument("--camera", type=int, default=0, help="Webcam device index (default: 0)")
+    parser.add_argument("--temporal", action="store_true",
+                        help="Use the UTA-RLDD temporal GRU checkpoint instead of the FL3D CNN")
     cli_args = parser.parse_args()
     if cli_args.image:
         run_image_inference(cli_args.image)
+    elif cli_args.temporal:
+        run_live_monitor(cli_args.camera)
     else:
         run_driver_state_monitor(cli_args.camera)

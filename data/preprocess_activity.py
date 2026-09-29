@@ -59,9 +59,10 @@ def grouped_split_indices(groups: np.ndarray, labels: np.ndarray,
     return train, validation
 
 
-def process_activity_videos(dataset_dir: str | Path, sequence_length: int = 30, stride: int = 30) -> None:
-    if sequence_length < 1 or stride < 1:
-        raise ValueError("sequence_length and stride must be positive")
+def process_activity_videos(dataset_dir: str | Path, sequence_length: int = 30, stride: int = 30,
+                            sample_fps: float = 1.0) -> None:
+    if sequence_length < 1 or stride < 1 or sample_fps <= 0:
+        raise ValueError("sequence_length, stride, and sample_fps must be positive")
     videos = sorted(p for p in Path(dataset_dir).rglob("*") if p.is_file()
                     and p.suffix.lower() in {".mp4", ".mov"} and label_for_video(p) is not None)
     if not videos:
@@ -78,10 +79,17 @@ def process_activity_videos(dataset_dir: str | Path, sequence_length: int = 30, 
             cap = cv2.VideoCapture(str(path))
             runs = []
             try:
+                source_fps = cap.get(cv2.CAP_PROP_FPS)
+                frame_step = max(1, round(source_fps / sample_fps)) if source_fps > 0 else 1
+                frame_index = 0
                 while True:
                     ok, frame = cap.read()
                     if not ok:
                         break
+                    if frame_index % frame_step:
+                        frame_index += 1
+                        continue
+                    frame_index += 1
                     result = mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                     if result.multi_face_landmarks:
                         h, w = frame.shape[:2]
@@ -119,7 +127,8 @@ def process_activity_videos(dataset_dir: str | Path, sequence_length: int = 30, 
     np.save(out / "groups.npy", group_ids)
     joblib.dump(scaler, out / "feature_scaler.joblib")
     metadata = {"feature_order": list(FEATURES), "sequence_length": sequence_length,
-                "stride": stride, "labels": {str(k): v for k, v in LABELS.items()},
+                "stride": stride, "sample_fps": sample_fps,
+                "labels": {str(k): v for k, v in LABELS.items()},
                 "split_seed": SPLIT_SEED, "validation_fraction": VALIDATION_FRACTION,
                 "scaler_fit_groups": train_groups}
     (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
@@ -132,5 +141,7 @@ if __name__ == "__main__":
                         help="UTA-RLDD directory returned by KaggleHub (default: data/raw_dataset)")
     parser.add_argument("--sequence-length", type=int, default=30)
     parser.add_argument("--stride", type=int, default=30)
+    parser.add_argument("--sample-fps", type=float, default=1.0,
+                        help="Run face landmark extraction at this sampling rate (default: 1 frame/second)")
     args = parser.parse_args()
-    process_activity_videos(args.dataset_dir, args.sequence_length, args.stride)
+    process_activity_videos(args.dataset_dir, args.sequence_length, args.stride, args.sample_fps)
