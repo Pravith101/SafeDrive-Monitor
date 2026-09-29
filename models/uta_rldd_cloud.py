@@ -11,7 +11,6 @@ from pathlib import Path
 
 import cv2
 import joblib
-import mediapipe as mp
 import numpy as np
 import torch
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
@@ -27,6 +26,10 @@ LABELS = {"0": 0, "5": 1, "10": 2}
 SEED = 42
 SEQUENCE_SECONDS = 30
 SAMPLE_FPS = 1.0
+FACE_LANDMARKER_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+    "face_landmarker/float16/1/face_landmarker.task"
+)
 
 
 class UtaGRU(nn.Module):
@@ -93,9 +96,31 @@ def discover_videos(root: Path):
     return rows
 
 
-def extract_sequences(videos, dataset_root, sequence_seconds=SEQUENCE_SECONDS, sample_fps=SAMPLE_FPS):
-    mesh = mp.solutions.face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
-                                            min_detection_confidence=0.5)
+def _create_face_landmarker(model_path):
+    import mediapipe as mp
+
+    if not hasattr(mp, "tasks"):
+        raise RuntimeError(f"MediaPipe {mp.__version__} does not expose the Tasks API")
+    options = mp.tasks.vision.FaceLandmarkerOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path=str(model_path)),
+        running_mode=mp.tasks.vision.RunningMode.IMAGE,
+        num_faces=1,
+        min_face_detection_confidence=0.5,
+        min_face_presence_confidence=0.5,
+    )
+    return mp, mp.tasks.vision.FaceLandmarker.create_from_options(options)
+
+
+def extract_sequences(videos, dataset_root, sequence_seconds=SEQUENCE_SECONDS,
+                      sample_fps=SAMPLE_FPS, face_model_path=None):
+    import urllib.request
+
+    model_path = Path(face_model_path or "/kaggle/working/face_landmarker.task")
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    if not model_path.is_file():
+        print(f"Downloading small MediaPipe face-landmarker model to {model_path}")
+        urllib.request.urlretrieve(FACE_LANDMARKER_MODEL_URL, model_path)
+    mp, landmarker = _create_face_landmarker(model_path)
     from vision.extractor import VisionExtractor
     extractor = VisionExtractor()
     xs, ys, participants, video_ids, starts, durations = [], [], [], [], [], []
@@ -116,12 +141,14 @@ def extract_sequences(videos, dataset_root, sequence_seconds=SEQUENCE_SECONDS, s
                         break
                     if frame_index % frame_step == 0:
                         timestamp = frame_index / fps if fps > 0 else len(times) / sample_fps
-                        result = mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                        result = landmarker.detect(image)
                         values = None
-                        if result.multi_face_landmarks:
+                        if result.face_landmarks:
                             h, w = frame.shape[:2]
                             try:
-                                m = extractor.extract_metrics(result.multi_face_landmarks[0].landmark, w, h)
+                                m = extractor.extract_metrics(result.face_landmarks[0], w, h)
                                 values = [getattr(m, key) for key in FEATURES]
                                 if not np.isfinite(values).all():
                                     values = None
@@ -150,7 +177,7 @@ def extract_sequences(videos, dataset_root, sequence_seconds=SEQUENCE_SECONDS, s
             print(f"[{i}/{len(videos)}] participant={row['participant']} label={CLASS_NAMES[row['label']]} "
                   f"windows={count} duration_s={duration:.1f}")
     finally:
-        mesh.close()
+        landmarker.close()
     if not xs:
         raise RuntimeError("No contiguous face-feature windows extracted; verify attached video codecs/content.")
     return {"x": np.asarray(xs, np.float32), "y": np.asarray(ys, np.int64),
