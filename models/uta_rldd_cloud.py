@@ -56,7 +56,7 @@ def discover_videos(root: Path):
     for path in sorted(root.rglob("*")):
         match = re.fullmatch(r"(0|5|10)(?:[_-].*)?", path.stem) if path.is_file() else None
         label = LABELS.get(match.group(1)) if match else None
-        if label is None or path.suffix.lower() not in {".mp4", ".mov"}:
+        if label is None or path.suffix.lower() not in {".mp4", ".mov", ".m4v"}:
             continue
         # Official UTA archive names groups Fold1_part1, Fold1_part2, etc.;
         # part archives belong to the same official fold.

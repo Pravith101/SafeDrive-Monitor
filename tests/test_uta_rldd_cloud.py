@@ -12,7 +12,7 @@ def test_discover_videos_keeps_official_participant_folds(tmp_path):
             folder = tmp_path / f"Fold{fold}_part1" / f"Fold{fold}_part1" / f"{person:02d}"
             folder.mkdir(parents=True)
             for label in ("0", "5", "10"):
-                (folder / f"{label}.mp4").touch()
+                (folder / (f"{label}.m4v" if person == 46 and label in {"0", "5"} else f"{label}.mp4")).touch()
 
     videos = discover_videos(tmp_path)
 
