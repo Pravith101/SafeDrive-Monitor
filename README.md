@@ -14,6 +14,8 @@ Only the trained checkpoint and report need to be downloaded from Kaggle. Put `d
 
 The workflow keeps each participant in one published fold, trains a three-class GRU over 30-second MediaPipe feature sequences, and tunes a drowsiness threshold on inner validation participants only. It evaluates the held-out participants at the video level and reports missed drowsy videos, non-drowsy videos with warnings, and time from clip start to the first threshold-crossing window. Since UTA-RLDD labels only each whole video's predominant state, it cannot provide true event-level misses or warning delay from the actual onset of drowsiness. FL3D's frame-level report remains separate; the label sets and evaluation units are not merged.
 
+After reviewing the cross-validation report, download `uta_rldd_final.pth` from the Kaggle notebook output into `weights/` to use the UTA-RLDD model: `python live_inference.py --uta-rldd`. It gathers features for each non-overlapping 30-second window and uses the threshold stored in that checkpoint. The webcam mode cannot promise that any individual warning is correct; it is a research demo and never a substitute for stopping when tired.
+
 No UTA-RLDD experiment results are claimed until the Kaggle notebook completes and its report is reviewed. This research prototype cannot establish that a real driving warning is correct or make driving safe.
 
 ## Dataset, labels, and license

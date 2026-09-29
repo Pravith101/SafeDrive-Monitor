@@ -1,6 +1,9 @@
 import numpy as np
 
 from models.uta_rldd_cloud import choose_threshold, discover_videos, summarize, video_rows
+from models.uta_rldd_cloud import FEATURES, UtaGRU
+from live_inference import load_uta_rldd_model
+import torch
 
 
 def test_discover_videos_keeps_official_participant_folds(tmp_path):
@@ -52,3 +55,25 @@ def test_summary_reports_video_warning_misses_and_clip_start_time():
     assert report["drowsy_videos_total"] == 2
     assert report["non_drowsy_videos_warned"] == 0
     assert report["median_first_warning_seconds_after_clip_start_on_detected_drowsy_videos"] == 30
+
+
+def test_live_loader_accepts_cloud_deployment_checkpoint(tmp_path):
+    model = UtaGRU()
+    path = tmp_path / "uta_rldd_final.pth"
+    torch.save({
+        "format": "safedrive-uta-rldd-gru-v1",
+        "state_dict": model.state_dict(),
+        "input_dim": len(FEATURES), "hidden_dim": 64, "num_layers": 2,
+        "num_classes": 3, "sequence_length": 30, "sample_fps": 1.0,
+        "feature_order": list(FEATURES),
+        "labels": {"0": "alert", "1": "low_vigilance", "2": "drowsy"},
+        "scaler_mean": [0.0] * len(FEATURES), "scaler_scale": [1.0] * len(FEATURES),
+        "drowsy_warning_threshold": 0.8,
+    }, path)
+
+    loaded, checkpoint, mean, scale = load_uta_rldd_model(path)
+
+    assert loaded(torch.zeros(1, 30, len(FEATURES))).shape == (1, 3)
+    assert checkpoint["drowsy_warning_threshold"] == 0.8
+    assert np.array_equal(mean, np.zeros(len(FEATURES), dtype=np.float32))
+    assert np.array_equal(scale, np.ones(len(FEATURES), dtype=np.float32))

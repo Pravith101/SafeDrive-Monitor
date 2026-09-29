@@ -183,6 +183,123 @@ def run_live_monitor(camera_index: int = 0) -> None:
         cv2.destroyAllWindows()
 
 
+def load_uta_rldd_model(checkpoint_path: str | Path, device="cpu"):
+    """Load the cloud-trained three-state UTA-RLDD model and fold-calibrated threshold."""
+    from models.uta_rldd_cloud import CLASS_NAMES, FEATURES, UtaGRU
+
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Missing UTA-RLDD checkpoint: {checkpoint_path}. "
+                                "Run the Kaggle UTA-RLDD notebook and download uta_rldd_final.pth.")
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "safedrive-uta-rldd-gru-v1":
+        raise ValueError("Checkpoint is not a compatible UTA-RLDD temporal model")
+    if (checkpoint.get("feature_order") != list(FEATURES) or
+            checkpoint.get("sequence_length") != 30 or checkpoint.get("num_classes") != len(CLASS_NAMES)):
+        raise ValueError("UTA-RLDD checkpoint feature order, sequence length, or classes are incompatible")
+    mean = np.asarray(checkpoint.get("scaler_mean"), dtype=np.float32)
+    scale = np.asarray(checkpoint.get("scaler_scale"), dtype=np.float32)
+    threshold = checkpoint.get("drowsy_warning_threshold")
+    if (mean.shape != (len(FEATURES),) or scale.shape != mean.shape or
+            not np.isfinite(mean).all() or not np.isfinite(scale).all() or (scale <= 0).any() or
+            not isinstance(threshold, (int, float)) or not np.isfinite(threshold) or not 0 <= threshold <= 1):
+        raise ValueError("UTA-RLDD checkpoint normalization or warning threshold is invalid")
+    model = UtaGRU(input_dim=len(FEATURES), hidden_dim=int(checkpoint["hidden_dim"]))
+    model.load_state_dict(checkpoint["state_dict"], strict=True)
+    model.to(device).eval()
+    return model, checkpoint, mean, scale
+
+
+def run_uta_rldd_monitor(camera_index: int = 0) -> None:
+    """Run the calibrated UTA-RLDD temporal model on non-overlapping 30-second windows."""
+    from models.uta_rldd_cloud import CLASS_NAMES, FEATURES
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, checkpoint, scaler_mean, scaler_scale = load_uta_rldd_model(
+        ROOT / "weights/uta_rldd_final.pth", device)
+    extractor = VisionExtractor()
+    sequence_length = int(checkpoint["sequence_length"])
+    feature_buffer = deque(maxlen=sequence_length)
+    sample_fps = float(checkpoint.get("sample_fps", 1.0))
+    last_sample = last_sound = 0.0
+    window_frames = 0
+    current_message, current_color = "Tracking driver...", (0, 200, 0)
+    cap = None
+    face_mesh = None
+    try:
+        face_mesh = mp.solutions.face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True,
+                                                    min_detection_confidence=0.5)
+        cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open webcam index {camera_index}.")
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            result = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            if not result.multi_face_landmarks:
+                feature_buffer.clear()
+                window_frames = 0
+                current_message, current_color = "Face lost - checking again", (0, 165, 255)
+            else:
+                now = time.monotonic()
+                if now - last_sample >= 1.0 / sample_fps:
+                    h, w = frame.shape[:2]
+                    try:
+                        metrics = extractor.extract_metrics(result.multi_face_landmarks[0].landmark, w, h)
+                        values = np.asarray([getattr(metrics, feature) for feature in FEATURES], dtype=np.float32)
+                        if not np.isfinite(values).all():
+                            raise ValueError("Face feature vector is non-finite")
+                        feature_buffer.append(values)
+                        window_frames += 1
+                        last_sample = now
+                        if len(feature_buffer) == sequence_length:
+                            if window_frames >= sequence_length:
+                                sequence = (np.asarray(feature_buffer, dtype=np.float32) - scaler_mean) / scaler_scale
+                                tensor = torch.from_numpy(sequence).unsqueeze(0).to(device)
+                                with torch.inference_mode():
+                                    probabilities = torch.softmax(model(tensor)[0], dim=0).cpu().numpy()
+                                prediction = int(probabilities.argmax())
+                                drowsy_score = float(probabilities[2])
+                                if drowsy_score >= float(checkpoint["drowsy_warning_threshold"]):
+                                    current_message, current_color = "DROWSINESS WARNING", (0, 0, 255)
+                                elif prediction == 2:
+                                    current_message, current_color = "Possible drowsiness - monitor", (0, 165, 255)
+                                else:
+                                    current_message = CLASS_NAMES[prediction].replace("_", " ").upper()
+                                    current_color = (0, 200, 0) if prediction == 0 else (0, 165, 255)
+                                window_frames = 0
+                    except (ValueError, cv2.error, FloatingPointError):
+                        feature_buffer.clear()
+                        window_frames = 0
+                        current_message, current_color = "Face features unavailable", (0, 165, 255)
+            if current_message == "DROWSINESS WARNING":
+                sound_now = time.monotonic()
+                if sound_now - last_sound >= ALERT_REPEAT_SECONDS:
+                    play_driver_warning()
+                    last_sound = sound_now
+            cv2.putText(frame, current_message, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                        current_color, 2)
+            if current_message == "DROWSINESS WARNING":
+                cv2.putText(frame, "Stop somewhere safe", (20, 84),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, current_color, 2)
+            elif len(feature_buffer) < sequence_length:
+                cv2.putText(frame, f"Collecting features: {len(feature_buffer)}/{sequence_length}s",
+                            (20, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            cv2.imshow("SafeDrive Monitor (UTA-RLDD)", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    finally:
+        if cap is not None:
+            cap.release()
+        if face_mesh is not None:
+            face_mesh.close()
+        cv2.destroyAllWindows()
+
+
 def load_driver_state_model(checkpoint_path: str | Path, device="cpu"):
     """Load the trained FL3D frame classifier used by the current webcam demo."""
     checkpoint_path = Path(checkpoint_path)
@@ -450,10 +567,14 @@ if __name__ == "__main__":
     parser.add_argument("--camera", type=int, default=0, help="Webcam device index (default: 0)")
     parser.add_argument("--temporal", action="store_true",
                         help="Use the UTA-RLDD temporal GRU checkpoint instead of the FL3D CNN")
+    parser.add_argument("--uta-rldd", action="store_true",
+                        help="Use the three-class UTA-RLDD checkpoint and validation-calibrated warning threshold")
     cli_args = parser.parse_args()
     if cli_args.image:
         run_image_inference(cli_args.image)
     elif cli_args.temporal:
         run_live_monitor(cli_args.camera)
+    elif cli_args.uta_rldd:
+        run_uta_rldd_monitor(cli_args.camera)
     else:
         run_driver_state_monitor(cli_args.camera)
