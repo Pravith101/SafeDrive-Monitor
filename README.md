@@ -8,6 +8,14 @@ Use [`models/cloud_training.ipynb`](models/cloud_training.ipynb) in Kaggle to tr
 
 Only the trained checkpoint and report need to be downloaded from Kaggle. Put `driver_state_cnn.pth` in `weights/` and run `python live_inference.py`. The earlier CPU run documented below used the project’s scratch CNN; it is a baseline and does not report results for pretrained fine-tuning.
 
+## UTA-RLDD participant-held-out evaluation
+
+[`models/uta_rldd_cloud.ipynb`](models/uta_rldd_cloud.ipynb) and [`models/uta_rldd_cloud.py`](models/uta_rldd_cloud.py) provide a separate Kaggle workflow for the roughly 111 GB [UTA-RLDD dataset](https://sites.google.com/view/utarldd/home). Attach both `rishab260/uta-reallife-drowsiness-dataset` (participant folds 1–4) and `mathiasviborg/uta-rldd-fold5` (fold 5) as notebook inputs, enable a GPU, and run the notebook. Videos and extracted features stay in Kaggle; the output contains five held-out-fold reports and checkpoints. Both Kaggle uploaders list CC0, but the mirrors are unofficial and their provenance/right to relicense are not independently verified. Prefer the official UTA source and cite Ghoddoosian, Galib, and Athitsos (CVPR Workshops 2019). Do not publicly share identifiable participant imagery.
+
+The workflow keeps each participant in one published fold, trains a three-class GRU over 30-second MediaPipe feature sequences, and tunes a drowsiness threshold on inner validation participants only. It evaluates the held-out participants at the video level and reports missed drowsy videos, non-drowsy videos with warnings, and time from clip start to the first threshold-crossing window. Since UTA-RLDD labels only each whole video's predominant state, it cannot provide true event-level misses or warning delay from the actual onset of drowsiness. FL3D's frame-level report remains separate; the label sets and evaluation units are not merged.
+
+No UTA-RLDD experiment results are claimed until the Kaggle notebook completes and its report is reviewed. This research prototype cannot establish that a real driving warning is correct or make driving safe.
+
 ## Dataset, labels, and license
 
 The project trains on [FL3D (Frame Level Driver Drowsiness Detection)](https://www.kaggle.com/datasets/matjazmuc/frame-level-driver-drowsiness-detection-fl3d), a frame-labeled derivative of the [NITYMED night-time driver dataset](https://datasets.esdalab.ece.uop.gr/). The FL3D Kaggle dataset is about **645 MB** and declares **CC BY-SA 4.0**. Attribute the FL3D dataset author and the NITYMED authors, preserve the license for distributed adaptations, and cite the referenced dataset work before reuse or redistribution.
@@ -47,15 +55,19 @@ python models/calibrate_mouth_gate.py --dataset-dir "data/downloaded/kaggle_cach
 python live_inference.py
 ```
 
-Press `q` in the camera window to quit. The live demo uses MediaPipe to crop a face and smooths predictions over nine frames. It no longer presents softmax as a confidence percentage. A CNN `yawning` prediction is shown as `UNCERTAIN` unless MediaPipe also measures an open-mouth cue above the threshold calibrated on the FL3D validation videos. A CNN `alert` prediction is shown as `UNCERTAIN` when both eyes look strongly closed. Check one still image without a webcam using `python live_inference.py --image path\to\frame.jpg`; this prints the raw CNN class, measured cues, and gated result.
+Press `q` in the camera window to quit. The live demo smooths CNN scores across nine frames and uses MediaPipe mouth and eye measurements as consistency checks. It shows possible microsleep evidence while checking, then plays a short system sound and displays **DROWSINESS WARNING — PULL OVER SAFELY** only when the microsleep score is at least `0.90` and the eye-closure cue agrees continuously for one second. The sound repeats every four seconds while both cues remain present. A yawning prediction requires an open-mouth cue; an `alert` prediction is withheld as `UNCERTAIN` when the eyes look strongly closed. Check one still image without a webcam using `python live_inference.py --image path\to\frame.jpg`.
 
-These visual cues are consistency checks, not diagnoses or proof of a state. The eye gate only withholds an `alert` result on strong eye-closure evidence; it does not reliably detect every microsleep. The model was trained on night-time, face-cropped footage; daylight webcam performance and person-level generalization require separate validation.
+The `0.90` softmax score is a conservative trigger setting, not a calibrated probability that a prediction is correct. Requiring sustained agreement from the CNN and eye-closure measurement reduces unsupported warnings, but cannot make the system certain: on held-out FL3D videos the CNN missed about 29% of microsleep frames, and the eye-closure cue also misses many events. Treat warnings as a prompt to check yourself and stop somewhere safe if drowsy; never rely on this prototype as a safety system or use its lack of a warning as evidence that driving is safe. The model was trained on night-time, face-cropped footage; daylight webcam performance and person-level generalization require separate validation.
 
 Training writes ignored artifacts: `weights/driver_state_cnn.pth` and `weights/driver_state_evaluation.json`. The report contains exact split video IDs, class counts, validation metrics, test metrics, confusion matrix, and training hardware. No model weights or dataset files are tracked in Git.
 
-## Verified training run
+## Current pretrained FL3D checkpoint
 
-Run completed on the downloaded FL3D snapshot with seed `42`, 64×64 RGB input, class/video-balanced sampling, batch size `256`, and eight epochs. Hardware was CPU-only (`torch 2.13.0+cpu`; CUDA unavailable). The best validation checkpoint was epoch 7. The participant ID limitation above applies to these measurements.
+The current local `weights/driver_state_cnn.pth` was trained on Kaggle with pretrained MobileNetV3-Small (best validation checkpoint: epoch 6). On its held-out-video FL3D test split it scored **90.47% accuracy**, **88.51% balanced accuracy**, and **90.24% macro-F1**. Microsleep recall was **71.37%** (1,635 of 2,291 microsleep frames detected), so 656 microsleep frames were missed. This is still not a participant-held-out or safety validation.
+
+## Earlier scratch-CNN baseline
+
+This earlier run completed on the downloaded FL3D snapshot with seed `42`, 64×64 RGB input, class/video-balanced sampling, batch size `256`, and eight epochs. Hardware was CPU-only (`torch 2.13.0+cpu`; CUDA unavailable). Its checkpoint/report have been superseded for webcam inference by the pretrained FL3D checkpoint above. The participant ID limitation above applies to these measurements.
 
 | Held-out split | Frames | Accuracy | Balanced accuracy | Macro-F1 |
 | --- | ---: | ---: | ---: | ---: |

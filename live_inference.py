@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import argparse
 import time
+import threading
 
 from models.temporal_gru import TemporalGRU, CHECKPOINT_VERSION
 from models.driver_state_cnn import (CHECKPOINT_FORMAT, ID_TO_CLASS, IMAGE_SIZE,
@@ -21,6 +22,53 @@ from vision.extractor import VisionExtractor
 ROOT = Path(__file__).resolve().parent
 FEATURES = VisionExtractor.FEATURES
 DEFAULT_MOUTH_OPEN_RATIO_THRESHOLD = MOUTH_OPEN_RATIO_THRESHOLD
+MICROSLEEP_SCORE_THRESHOLD = 0.90
+MICROSLEEP_HOLD_SECONDS = 1.0
+ALERT_REPEAT_SECONDS = 4.0
+
+
+class DriverAlertPolicy:
+    """Require strong model and eye-closure evidence to trigger an audible alert."""
+
+    def __init__(self, score_threshold=MICROSLEEP_SCORE_THRESHOLD,
+                 hold_seconds=MICROSLEEP_HOLD_SECONDS,
+                 repeat_seconds=ALERT_REPEAT_SECONDS):
+        self.score_threshold = score_threshold
+        self.hold_seconds = hold_seconds
+        self.repeat_seconds = repeat_seconds
+        self.evidence_since = None
+        self.last_sound = None
+
+    def update(self, microsleep_score: float, eye_ratio: float,
+               eye_closed_threshold: float, now: float) -> tuple[bool, bool]:
+        """Return (alert_active, play_sound) for this frame."""
+        supported = (np.isfinite(microsleep_score) and
+                     microsleep_score >= self.score_threshold and
+                     np.isfinite(eye_ratio) and eye_ratio < eye_closed_threshold)
+        if not supported:
+            self.evidence_since = None
+            self.last_sound = None
+            return False, False
+        if self.evidence_since is None:
+            self.evidence_since = now
+        active = now - self.evidence_since >= self.hold_seconds
+        play_sound = active and (self.last_sound is None or
+                                 now - self.last_sound >= self.repeat_seconds)
+        if play_sound:
+            self.last_sound = now
+        return active, play_sound
+
+
+def play_driver_warning() -> None:
+    """Play a short system warning without blocking webcam frame processing."""
+    def beep():
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except (ImportError, RuntimeError):
+            print("\\a", end="", flush=True)
+
+    threading.Thread(target=beep, daemon=True).start()
 
 
 def load_model_artifacts(checkpoint_path: str | Path, scaler_path: str | Path, device="cpu"):
@@ -288,11 +336,12 @@ def predict_driver_state(model, frame, landmarks, device="cpu"):
 
 
 def run_driver_state_monitor(camera_index: int = 0) -> None:
-    """Run face-frame classification on webcam video with a short vote smoother."""
+    """Run conservative webcam classification and sustained drowsiness warnings."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, _ = load_driver_state_model(ROOT / "weights/driver_state_cnn.pth", device)
     from collections import deque
     votes = deque(maxlen=9)
+    alert_policy = DriverAlertPolicy()
     cap = None
     face_mesh = None
     try:
@@ -314,27 +363,43 @@ def run_driver_state_monitor(camera_index: int = 0) -> None:
                     averaged = np.mean(votes, axis=0)
                     raw_state = ID_TO_CLASS[str(int(averaged.argmax()))]
                     landmarks = result.multi_face_landmarks[0].landmark
+                    eye_ratio = eye_aspect_ratio(landmarks, frame.shape[1], frame.shape[0])
                     aperture = mouth_aperture_ratio(landmarks, frame.shape[1], frame.shape[0])
                     state = apply_mouth_consistency_gate(
                         raw_state, aperture,
                         getattr(model, "mouth_open_ratio_threshold", DEFAULT_MOUTH_OPEN_RATIO_THRESHOLD))
                     state = apply_eye_consistency_gate(
-                        state, eye_aspect_ratio(landmarks, frame.shape[1], frame.shape[0]),
+                        state, eye_ratio,
                         getattr(model, "eye_closed_ratio_threshold", EYE_CLOSED_RATIO_THRESHOLD))
-                    color = (0, 165, 255) if state == "uncertain" else (
-                        (0, 0, 255) if state != "alert" else (0, 200, 0))
-                    if state == "uncertain":
+                    warning_active, play_sound = alert_policy.update(
+                        float(averaged[1]), eye_ratio,
+                        getattr(model, "eye_closed_ratio_threshold", EYE_CLOSED_RATIO_THRESHOLD),
+                        time.monotonic())
+                    if play_sound:
+                        play_driver_warning()
+                    if warning_active:
+                        message, color = "DROWSINESS WARNING", (0, 0, 255)
+                    elif raw_state == "microsleep":
+                        message, color = "Possible microsleep - checking evidence", (0, 165, 255)
+                    elif state == "uncertain":
+                        color = (0, 165, 255)
                         cue = "mouth cue absent" if raw_state == "yawning" else "eyes appear closed"
                         message = f"UNCERTAIN: {cue}"
                     else:
                         message = state.upper()
+                        color = (0, 200, 0) if state == "alert" else (255, 180, 0)
                 except (ValueError, cv2.error, FloatingPointError):
                     votes.clear()
+                    alert_policy.update(0.0, 1.0, EYE_CLOSED_RATIO_THRESHOLD, time.monotonic())
                     message, color = "Face crop unavailable", (0, 165, 255)
             else:
                 votes.clear()
+                alert_policy.update(0.0, 1.0, EYE_CLOSED_RATIO_THRESHOLD, time.monotonic())
                 message, color = "Face lost", (0, 165, 255)
             cv2.putText(frame, message, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+            if message == "DROWSINESS WARNING":
+                cv2.putText(frame, "Pull over safely", (20, 84),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             cv2.imshow("SafeDrive Monitor (FL3D CNN)", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
