@@ -12,9 +12,10 @@ import time
 
 from models.temporal_gru import TemporalGRU, CHECKPOINT_VERSION
 from models.driver_state_cnn import (CHECKPOINT_FORMAT, ID_TO_CLASS, IMAGE_SIZE,
+                                     SCRATCH_ARCHITECTURE,
                                      EYE_CLOSED_RATIO_THRESHOLD, EYE_GATE_VERSION,
                                      MOUTH_GATE_VERSION, MOUTH_OPEN_RATIO_THRESHOLD,
-                                     DriverStateCNN)
+                                     DriverStateCNN, TRANSFER_ARCHITECTURE)
 from vision.extractor import VisionExtractor
 
 ROOT = Path(__file__).resolve().parent
@@ -149,8 +150,17 @@ def load_driver_state_model(checkpoint_path: str | Path, device="cpu"):
     if checkpoint.get("image_size") != IMAGE_SIZE or checkpoint.get("class_to_id") != {
             "alert": 0, "microsleep": 1, "yawning": 2}:
         raise ValueError("Checkpoint image size or class map is incompatible")
-    if (checkpoint.get("normalization_mean") != [0.5, 0.5, 0.5] or
-            checkpoint.get("normalization_std") != [0.5, 0.5, 0.5]):
+    architecture = checkpoint.get("architecture", SCRATCH_ARCHITECTURE)
+    if architecture not in {SCRATCH_ARCHITECTURE, TRANSFER_ARCHITECTURE}:
+        raise ValueError("Checkpoint architecture is incompatible")
+    try:
+        normalization_mean = np.asarray(checkpoint.get("normalization_mean", [0.5] * 3), dtype=np.float32)
+        normalization_std = np.asarray(checkpoint.get("normalization_std", [0.5] * 3), dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Checkpoint normalization metadata is incompatible") from exc
+    if (normalization_mean.shape != (3,) or normalization_std.shape != (3,) or
+            not np.isfinite(normalization_mean).all() or not np.isfinite(normalization_std).all() or
+            (normalization_std <= 0).any()):
         raise ValueError("Checkpoint normalization metadata is incompatible")
     if checkpoint.get("mouth_gate_version") != MOUTH_GATE_VERSION:
         raise ValueError("Checkpoint is missing the compatible calibrated mouth-opening gate")
@@ -164,9 +174,11 @@ def load_driver_state_model(checkpoint_path: str | Path, device="cpu"):
     if (not isinstance(eye_threshold, (float, int)) or not np.isfinite(eye_threshold) or
             eye_threshold <= 0):
         raise ValueError("Checkpoint is missing a valid calibrated eye-closure threshold")
-    model = DriverStateCNN(num_classes=len(ID_TO_CLASS))
+    model = DriverStateCNN(num_classes=len(ID_TO_CLASS), architecture=architecture)
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     model.to(device).eval()
+    model.normalization_mean = tuple(normalization_mean.tolist())
+    model.normalization_std = tuple(normalization_std.tolist())
     bias = np.asarray(checkpoint.get("decision_bias", [0.0, 0.0, 0.0]), dtype=np.float32)
     if bias.shape != (len(ID_TO_CLASS),) or not np.isfinite(bias).all():
         raise ValueError("Checkpoint contains an invalid class decision bias")
@@ -235,7 +247,8 @@ def apply_eye_consistency_gate(state: str, aspect_ratio: float,
     return state
 
 
-def prepare_face_tensor(frame, landmarks):
+def prepare_face_tensor(frame, landmarks, normalization_mean=(0.5, 0.5, 0.5),
+                       normalization_std=(0.5, 0.5, 0.5)):
     """Crop and normalize a detected face to the FL3D classifier input."""
     height, width = frame.shape[:2]
     points = np.asarray([(point.x * width, point.y * height) for point in landmarks], dtype=np.float32)
@@ -252,13 +265,15 @@ def prepare_face_tensor(frame, landmarks):
     rgb = cv2.cvtColor(cv2.resize(crop, (IMAGE_SIZE, IMAGE_SIZE), interpolation=cv2.INTER_AREA),
                        cv2.COLOR_BGR2RGB)
     array = rgb.astype(np.float32) / 255.0
-    array = (array - 0.5) / 0.5
+    array = (array - np.asarray(normalization_mean, dtype=np.float32)) / np.asarray(
+        normalization_std, dtype=np.float32)
     return torch.from_numpy(array).permute(2, 0, 1).unsqueeze(0).contiguous()
 
 
 @torch.inference_mode()
 def predict_driver_state(model, frame, landmarks, device="cpu"):
-    tensor = prepare_face_tensor(frame, landmarks).to(device)
+    tensor = prepare_face_tensor(frame, landmarks, getattr(model, "normalization_mean", (0.5,) * 3),
+                                 getattr(model, "normalization_std", (0.5,) * 3)).to(device)
     logits = model(tensor)[0] + getattr(model, "decision_bias", 0.0)
     probabilities = torch.softmax(logits, dim=0).cpu().numpy()
     label_id = int(probabilities.argmax())
@@ -346,7 +361,8 @@ def run_image_inference(image_path: str | Path) -> None:
         print("prediction=face_not_found")
         return
     landmarks = result.multi_face_landmarks[0].landmark
-    raw_tensor = prepare_face_tensor(frame, landmarks).to(device)
+    raw_tensor = prepare_face_tensor(frame, landmarks, model.normalization_mean,
+                                     model.normalization_std).to(device)
     with torch.inference_mode():
         logits = model(raw_tensor)[0] + getattr(model, "decision_bias", 0.0)
         probabilities = torch.softmax(logits, dim=0).cpu().numpy()

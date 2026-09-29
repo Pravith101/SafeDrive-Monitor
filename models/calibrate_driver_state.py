@@ -38,8 +38,10 @@ def main():
     model, checkpoint = load_driver_state_model(args.checkpoint, device)
     records, skipped = collect_records(args.dataset_dir)
     train_idx, val_idx, test_idx = split_records(records, int(checkpoint.get("seed", 42)))
-    val_loader = make_loader(records, val_idx, args.batch_size)
-    test_loader = make_loader(records, test_idx, args.batch_size)
+    normalization = {"normalization_mean": checkpoint["normalization_mean"],
+                    "normalization_std": checkpoint["normalization_std"]}
+    val_loader = make_loader(records, val_idx, args.batch_size, **normalization)
+    test_loader = make_loader(records, test_idx, args.batch_size, **normalization)
     val_logits, y_val = collect_logits(model, val_loader, device)
     candidates = np.arange(-0.5, 2.01, 0.25, dtype=np.float32)
     scored = []

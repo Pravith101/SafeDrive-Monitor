@@ -21,6 +21,10 @@ IMAGE_SIZE = 64
 CLASS_TO_ID = {"alert": 0, "microsleep": 1, "yawning": 2}
 ID_TO_CLASS = {str(v): k for k, v in CLASS_TO_ID.items()}
 CHECKPOINT_FORMAT = "safedrive-fl3d-cnn-v1"
+SCRATCH_ARCHITECTURE = "safedrive-cnn"
+TRANSFER_ARCHITECTURE = "mobilenet_v3_small_imagenet"
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 SEED = 42
 MOUTH_GATE_VERSION = "mediapipe-468-inner-lip-ratio-v1"
 MOUTH_OPEN_RATIO_THRESHOLD = 0.2684476375579834
@@ -29,8 +33,22 @@ EYE_CLOSED_RATIO_THRESHOLD = 0.12484410527134987
 
 
 class DriverStateCNN(nn.Module):
-    def __init__(self, num_classes: int = 3):
+    def __init__(self, num_classes: int = 3, architecture: str = SCRATCH_ARCHITECTURE,
+                 pretrained: bool = False):
         super().__init__()
+        self.architecture = architecture
+        if architecture == TRANSFER_ARCHITECTURE:
+            from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small
+
+            weights = MobileNet_V3_Small_Weights.DEFAULT if pretrained else None
+            self.backbone = mobilenet_v3_small(weights=weights)
+            input_features = self.backbone.classifier[-1].in_features
+            self.backbone.classifier[-1] = nn.Linear(input_features, num_classes)
+            self.normalization_mean = IMAGENET_MEAN
+            self.normalization_std = IMAGENET_STD
+            return
+        if architecture != SCRATCH_ARCHITECTURE:
+            raise ValueError(f"Unsupported model architecture: {architecture}")
         self.features = nn.Sequential(
             nn.Conv2d(3, 24, kernel_size=3, padding=1), nn.BatchNorm2d(24), nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
@@ -42,8 +60,12 @@ class DriverStateCNN(nn.Module):
             nn.AdaptiveAvgPool2d((1, 1)),
         )
         self.classifier = nn.Sequential(nn.Flatten(), nn.Dropout(0.35), nn.Linear(128, num_classes))
+        self.normalization_mean = (0.5, 0.5, 0.5)
+        self.normalization_std = (0.5, 0.5, 0.5)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.architecture == TRANSFER_ARCHITECTURE:
+            return self.backbone(x)
         return self.classifier(self.features(x))
 
 
@@ -100,10 +122,13 @@ def split_records(records, seed: int = SEED):
 
 
 class FrameDataset(Dataset):
-    def __init__(self, records, indices, augment: bool = False):
+    def __init__(self, records, indices, augment: bool = False,
+                 normalization_mean=(0.5, 0.5, 0.5), normalization_std=(0.5, 0.5, 0.5)):
         self.records = records
         self.indices = np.asarray(indices, dtype=np.int64)
         self.augment = augment
+        self.normalization_mean = np.asarray(normalization_mean, dtype=np.float32)
+        self.normalization_std = np.asarray(normalization_std, dtype=np.float32)
 
     def __len__(self):
         return len(self.indices)
@@ -119,12 +144,16 @@ class FrameDataset(Dataset):
                 image = ImageEnhance.Contrast(image).enhance(random.uniform(0.9, 1.1))
             array = np.asarray(image, dtype=np.float32) / 255.0
         tensor = torch.from_numpy(array).permute(2, 0, 1).contiguous()
-        tensor = (tensor - 0.5) / 0.5
+        mean = torch.as_tensor(self.normalization_mean)[:, None, None]
+        std = torch.as_tensor(self.normalization_std)[:, None, None]
+        tensor = (tensor - mean) / std
         return tensor, int(label)
 
 
-def make_loader(records, indices, batch_size: int, shuffle: bool = False, augment: bool = False):
-    dataset = FrameDataset(records, indices, augment=augment)
+def make_loader(records, indices, batch_size: int, shuffle: bool = False, augment: bool = False,
+                normalization_mean=(0.5, 0.5, 0.5), normalization_std=(0.5, 0.5, 0.5)):
+    dataset = FrameDataset(records, indices, augment=augment,
+                           normalization_mean=normalization_mean, normalization_std=normalization_std)
     sampler = None
     if shuffle:
         group_class_counts = Counter((records[int(i)][2], records[int(i)][1]) for i in indices)
@@ -170,6 +199,8 @@ def main():
     parser.add_argument("--epochs", type=int, default=12)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--patience", type=int, default=3)
+    parser.add_argument("--pretrained", action="store_true",
+                        help="Fine-tune ImageNet-pretrained MobileNetV3-Small instead of the scratch CNN")
     parser.add_argument("--output", type=Path, default=ROOT / "weights" / "driver_state_cnn.pth")
     args = parser.parse_args()
     if args.epochs < 1 or args.batch_size < 1 or args.patience < 1:
@@ -186,12 +217,16 @@ def main():
               f"videos={sorted({records[int(i)][2] for i in idx})}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = DriverStateCNN().to(device)
+    architecture = TRANSFER_ARCHITECTURE if args.pretrained else SCRATCH_ARCHITECTURE
+    model = DriverStateCNN(architecture=architecture, pretrained=args.pretrained).to(device)
     torch.set_num_threads(max(1, min(8, torch.get_num_threads())))
-    train_loader = make_loader(records, train_idx, args.batch_size, shuffle=True, augment=True)
-    val_loader = make_loader(records, val_idx, args.batch_size)
-    test_loader = make_loader(records, test_idx, args.batch_size)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=8e-4, weight_decay=1e-4)
+    norm = {"normalization_mean": model.normalization_mean,
+            "normalization_std": model.normalization_std}
+    train_loader = make_loader(records, train_idx, args.batch_size, shuffle=True, augment=True, **norm)
+    val_loader = make_loader(records, val_idx, args.batch_size, **norm)
+    test_loader = make_loader(records, test_idx, args.batch_size, **norm)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4 if args.pretrained else 8e-4,
+                                 weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
     best_f1, best_state, stale, best_epoch = -1.0, None, 0, 0
 
@@ -236,6 +271,7 @@ def main():
         "license": "CC BY-SA 4.0",
         "seed": SEED,
         "device": str(device),
+        "architecture": architecture,
         "image_size": IMAGE_SIZE,
         "labels": ID_TO_CLASS,
         "skipped_annotations": skipped,
@@ -248,8 +284,10 @@ def main():
         "test": metrics(y_test, p_test),
     }
     checkpoint = {"format": CHECKPOINT_FORMAT, "state_dict": best_state,
+                  "architecture": architecture,
                   "image_size": IMAGE_SIZE, "class_to_id": CLASS_TO_ID,
-                  "normalization_mean": [0.5] * 3, "normalization_std": [0.5] * 3,
+                  "normalization_mean": list(model.normalization_mean),
+                  "normalization_std": list(model.normalization_std),
                   "mouth_gate_version": MOUTH_GATE_VERSION,
                   "mouth_open_ratio_threshold": MOUTH_OPEN_RATIO_THRESHOLD,
                   "eye_gate_version": EYE_GATE_VERSION,
