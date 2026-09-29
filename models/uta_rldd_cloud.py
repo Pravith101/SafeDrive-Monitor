@@ -15,7 +15,6 @@ import mediapipe as mp
 import numpy as np
 import torch
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
-from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import StandardScaler
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
