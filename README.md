@@ -14,9 +14,21 @@ Only the trained checkpoint and report need to be downloaded from Kaggle. Put `d
 
 The workflow keeps each participant in one published fold, trains a three-class GRU over 30-second MediaPipe feature sequences, and tunes a drowsiness threshold on inner validation participants only. It evaluates the held-out participants at the video level and reports missed drowsy videos, non-drowsy videos with warnings, and time from clip start to the first threshold-crossing window. Since UTA-RLDD labels only each whole video's predominant state, it cannot provide true event-level misses or warning delay from the actual onset of drowsiness. FL3D's frame-level report remains separate; the label sets and evaluation units are not merged.
 
-After reviewing the cross-validation report, download `uta_rldd_final.pth` from the Kaggle notebook output into `weights/` to use the UTA-RLDD model: `python live_inference.py --uta-rldd`. It gathers features for each non-overlapping 30-second window and uses the threshold stored in that checkpoint. The webcam mode cannot promise that any individual warning is correct; it is a research demo and never a substitute for stopping when tired.
+The completed Kaggle run outputs are saved locally as `weights/uta_rldd_final.pth` and `weights/uta_rldd_evaluation.json`; the five fold checkpoints and the raw report remain available from the notebook output. The final checkpoint can be loaded experimentally with `python live_inference.py --uta-rldd`, but the measured recall is too low for driver-alert use. Do not substitute it for the existing FL3D model or rely on either prototype while driving.
 
-No UTA-RLDD experiment results are claimed until the Kaggle notebook completes and its report is reviewed. This research prototype cannot establish that a real driving warning is correct or make driving safe.
+### UTA-RLDD results (Kaggle, five participant-disjoint folds)
+
+The run processed 182 videos from 60 participants. Mean held-out video accuracy was **44.7%**, macro-F1 **42.7%**, and drowsy-video recall **35.0%**. It missed an average of **8 drowsy-labeled videos per fold** (the folds contained 12–13 such videos); the mean non-drowsy video false-warning rate was **14.2%**. The average median time to the first threshold-crossing window was **204.5 seconds after clip start** among detected drowsy-labeled videos only. Because labels describe each entire video’s predominant state and provide no onset time, this is not event-warning delay and event misses cannot be measured. These results do not support using this model for driver alerts. Thresholds were selected using validation participants only; test-fold results were not used for calibration. UTA metrics are video-level and are not directly comparable with FL3D’s frame-level metrics. Per-fold held-out results:
+
+| Official test fold | Video accuracy | Macro-F1 | Drowsy-video recall | Non-drowsy false-warning rate | Drowsy videos missed |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 33.3% | 32.8% | 41.7% | 29.2% | 7 / 12 |
+| 2 | 42.9% | 39.5% | 25.0% | 4.3% | 9 / 12 |
+| 3 | 45.9% | 45.2% | 46.2% | 29.2% | 7 / 13 |
+| 4 | 52.8% | 53.1% | 8.3% | 0.0% | 11 / 12 |
+| 5 | 48.6% | 43.1% | 53.8% | 8.3% | 6 / 13 |
+
+This research prototype is not safety-certified and cannot establish that a real driving warning is correct or make driving safe.
 
 ## Dataset, labels, and license
 
