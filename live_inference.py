@@ -26,6 +26,35 @@ MICROSLEEP_SCORE_THRESHOLD = 0.90
 MICROSLEEP_HOLD_SECONDS = 1.0
 ALERT_REPEAT_SECONDS = 4.0
 MAX_ALERT_EVIDENCE_GAP_SECONDS = 0.5
+STATE_CUE_COOLDOWN_SECONDS = 3.0
+STATE_TONE_PATTERNS = {
+    "microsleep": ((1040, 180), (780, 180), (1040, 320)),
+    "yawning": ((660, 110), (880, 160)),
+    "uncertain": ((440, 140),),
+}
+
+
+class StateSoundPolicy:
+    """Play brief cues on entry to validated non-alert states, with a cooldown."""
+
+    def __init__(self, cooldown_seconds=STATE_CUE_COOLDOWN_SECONDS):
+        self.cooldown_seconds = cooldown_seconds
+        self.last_state = None
+        self.last_sound_at = None
+
+    def update(self, state: str, now: float) -> str | None:
+        if not np.isfinite(now):
+            self.last_state = None
+            return None
+        entered = state != self.last_state
+        self.last_state = state
+        if not entered or state not in {"yawning", "uncertain"}:
+            return None
+        if (self.last_sound_at is not None and
+                now - self.last_sound_at < self.cooldown_seconds):
+            return None
+        self.last_sound_at = now
+        return state
 
 
 class DriverAlertPolicy:
@@ -68,16 +97,22 @@ class DriverAlertPolicy:
         return active, play_sound
 
 
-def play_driver_warning() -> None:
-    """Play a short system warning without blocking webcam frame processing."""
-    def beep():
+def play_state_sound(state: str) -> None:
+    """Play the selected state cue without blocking webcam frame processing."""
+    pattern = STATE_TONE_PATTERNS.get(state)
+    if pattern is None:
+        return
+
+    def play_pattern():
         try:
             import winsound
-            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            for frequency, duration_ms in pattern:
+                winsound.Beep(frequency, duration_ms)
+                time.sleep(0.07)
         except (ImportError, RuntimeError):
-            print("\\a", end="", flush=True)
+            print("\\a" * len(pattern), end="", flush=True)
 
-    threading.Thread(target=beep, daemon=True).start()
+    threading.Thread(target=play_pattern, daemon=True).start()
 
 
 def load_model_artifacts(checkpoint_path: str | Path, scaler_path: str | Path, device="cpu"):
@@ -461,6 +496,7 @@ def run_driver_state_monitor(camera_index: int = 0) -> None:
     from collections import deque
     votes = deque(maxlen=9)
     alert_policy = DriverAlertPolicy()
+    state_sound_policy = StateSoundPolicy()
     cap = None
     face_mesh = None
     try:
@@ -494,8 +530,12 @@ def run_driver_state_monitor(camera_index: int = 0) -> None:
                         float(averaged[1]), eye_ratio,
                         getattr(model, "eye_closed_ratio_threshold", EYE_CLOSED_RATIO_THRESHOLD),
                         time.monotonic())
+                    cue = state_sound_policy.update(
+                        "microsleep" if warning_active else state, time.monotonic())
                     if play_sound:
-                        play_driver_warning()
+                        play_state_sound("microsleep")
+                    elif cue:
+                        play_state_sound(cue)
                     if warning_active:
                         message, color = "DROWSINESS WARNING", (0, 0, 255)
                     elif raw_state == "microsleep":
@@ -510,10 +550,16 @@ def run_driver_state_monitor(camera_index: int = 0) -> None:
                 except (ValueError, cv2.error, FloatingPointError):
                     votes.clear()
                     alert_policy.update(0.0, 1.0, EYE_CLOSED_RATIO_THRESHOLD, time.monotonic())
+                    cue = state_sound_policy.update("uncertain", time.monotonic())
+                    if cue:
+                        play_state_sound(cue)
                     message, color = "Face crop unavailable", (0, 165, 255)
             else:
                 votes.clear()
                 alert_policy.update(0.0, 1.0, EYE_CLOSED_RATIO_THRESHOLD, time.monotonic())
+                cue = state_sound_policy.update("uncertain", time.monotonic())
+                if cue:
+                    play_state_sound(cue)
                 message, color = "Face lost", (0, 165, 255)
             cv2.putText(frame, message, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
             if message == "DROWSINESS WARNING":

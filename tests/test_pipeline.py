@@ -15,7 +15,8 @@ from models.driver_state_cnn import (CLASS_TO_ID, CHECKPOINT_FORMAT,
 from live_inference import (load_driver_state_model, prepare_face_tensor,
                             eye_aspect_ratio, mouth_aperture_ratio,
                             apply_eye_consistency_gate, apply_mouth_consistency_gate,
-                            predict_driver_state, DriverAlertPolicy)
+                            predict_driver_state, DriverAlertPolicy,
+                            StateSoundPolicy, STATE_TONE_PATTERNS)
 from vision.extractor import VisionExtractor
 
 torch.set_num_threads(min(4, torch.get_num_threads()))
@@ -234,3 +235,22 @@ def test_driver_alert_resets_on_disagreement_or_missing_score():
     assert policy.update(.95, .2, .12, .75) == (False, False)
     assert policy.update(.95, .1, .12, 1.0) == (False, False)
     assert policy.update(float("nan"), .1, .12, 1.25) == (False, False)
+
+
+def test_state_sound_cues_are_transition_based_and_distinct():
+    policy = StateSoundPolicy(cooldown_seconds=3.0)
+
+    assert policy.update("alert", 0.0) is None
+    assert policy.update("microsleep", 1.0) is None  # Not confirmed by the alert gate.
+    assert policy.update("yawning", 2.0) == "yawning"
+    assert policy.update("yawning", 2.1) is None
+    assert policy.update("alert", 3.0) is None
+    assert policy.update("uncertain", 5.1) == "uncertain"
+    assert policy.update("uncertain", 5.2) is None
+    assert policy.update("alert", 6.0) is None
+    assert policy.update("yawning", 8.2) == "yawning"
+
+    assert len(STATE_TONE_PATTERNS["microsleep"]) == 3
+    assert len(STATE_TONE_PATTERNS["yawning"]) == 2
+    assert len(STATE_TONE_PATTERNS["uncertain"]) == 1
+    assert "alert" not in STATE_TONE_PATTERNS
