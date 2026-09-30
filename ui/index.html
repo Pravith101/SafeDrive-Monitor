@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111817">
+  <meta name="description" content="Local driver-state monitoring prototype using the existing SafeDrive model.">
+  <title>SafeDrive Monitor</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="SafeDrive Monitor home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 42 42" fill="none"><path d="M21 3 35 8v11c0 9-5.8 15.6-14 20C12.8 34.6 7 28 7 19V8l14-5Z" stroke="currentColor" stroke-width="2"/><path d="M13 21.5c2.3-3.1 4.9-4.7 8-4.7s5.7 1.6 8 4.7c-2.3 3.1-4.9 4.7-8 4.7s-5.7-1.6-8-4.7Z" stroke="currentColor" stroke-width="1.8"/><circle cx="21" cy="21.5" r="2.7" fill="currentColor"/></svg>
+        </span>
+        <span class="brand-copy"><strong>SafeDrive</strong><small>DRIVER MONITOR</small></span>
+      </a>
+      <div class="topbar-meta">
+        <span class="privacy-chip"><span class="privacy-dot"></span> LOCAL PROCESSING</span>
+        <span class="model-chip"><span class="model-pulse"></span> FL3D MODEL READY</span>
+      </div>
+      <button id="sound-toggle" class="icon-button sound-button" type="button" aria-pressed="false" title="Enable warning sounds">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h4l5 4V6l-5 4H4Z"/><path d="M17 9a5 5 0 0 1 0 6M19.5 6.5a8.5 8.5 0 0 1 0 11"/></svg>
+        <span>Sound off</span>
+      </button>
+    </header>
+
+    <main>
+      <section class="intro-row">
+        <div>
+          <p class="eyebrow"><span class="eyebrow-line"></span> REAL-TIME DRIVER STATE</p>
+          <h1>Stay aware.<br><em>Arrive safely.</em></h1>
+          <p class="intro-copy">A local camera prototype that watches for visible signs of microsleep and gives state-specific cues.</p>
+        </div>
+        <div class="session-meta">
+          <div><span class="meta-label">SESSION</span><strong id="session-clock">00:00</strong></div>
+          <div class="meta-divider"></div>
+          <div><span class="meta-label">DEVICE</span><strong id="device-label">Checking…</strong></div>
+        </div>
+      </section>
+
+      <section class="dashboard-grid" aria-label="Live monitoring dashboard">
+        <article class="camera-panel panel">
+          <div class="panel-heading">
+            <div><span class="section-index">01</span><h2>Cabin view</h2></div>
+            <div class="camera-state"><span id="camera-indicator" class="indicator"></span><span id="camera-status">CAMERA OFF</span></div>
+          </div>
+          <div id="camera-stage" class="camera-stage">
+            <video id="camera" autoplay playsinline muted></video>
+            <canvas id="capture" hidden></canvas>
+            <div class="camera-vignette"></div>
+            <div class="frame-corners" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+            <div class="camera-overlay-top"><span id="live-tag" class="live-tag"><span></span> STANDBY</span><span class="local-tag">NO VIDEO SAVED</span></div>
+            <div id="camera-placeholder" class="camera-placeholder">
+              <div class="placeholder-orbit"><div class="placeholder-head"></div><div class="placeholder-shoulders"></div></div>
+              <p class="placeholder-title">Your camera view will appear here</p>
+              <p class="placeholder-copy">Frames stay on this computer and are discarded after inference.</p>
+            </div>
+            <div id="face-tag" class="face-tag" hidden><span></span> FACE TRACKED</div>
+          </div>
+          <div class="camera-controls">
+            <div class="camera-help"><span class="camera-help-icon">i</span><span id="camera-hint">Position your face in the center of the frame.</span></div>
+            <div class="control-buttons">
+              <button id="start-button" class="button button-primary" type="button"><span class="button-icon">▶</span> Start monitoring</button>
+              <button id="stop-button" class="button button-quiet" type="button" disabled>Stop</button>
+            </div>
+          </div>
+        </article>
+
+        <aside class="state-panel panel" aria-live="polite">
+          <div class="panel-heading">
+            <div><span class="section-index">02</span><h2>Current state</h2></div>
+            <span id="state-code" class="state-code">IDLE</span>
+          </div>
+          <div id="state-card" class="state-card state-idle">
+            <div class="state-symbol" aria-hidden="true">
+              <svg class="symbol-eye" viewBox="0 0 56 40"><path d="M4 20S13 5 28 5s24 15 24 15-9 15-24 15S4 20 4 20Z"/><circle cx="28" cy="20" r="7"/><circle class="eye-glint" cx="30.5" cy="17.5" r="2"/></svg>
+              <svg class="symbol-alert" viewBox="0 0 48 48"><path d="M24 4 45 42H3L24 4Z"/><path d="M24 17v11M24 34h.02"/></svg>
+              <svg class="symbol-check" viewBox="0 0 48 48"><circle cx="24" cy="24" r="19"/><path d="m15 24 6 6 13-14"/></svg>
+            </div>
+            <p id="state-kicker" class="state-kicker">READY WHEN YOU ARE</p>
+            <h3 id="state-title">Monitoring is off</h3>
+            <p id="state-description" class="state-description">Start the camera monitor when parked and ready. This prototype cannot determine whether it is safe to drive.</p>
+            <div id="warning-banner" class="warning-banner" hidden><span class="warning-mark">!</span><div><strong>DROWSINESS WARNING</strong><span>Pull over safely as soon as you can.</span></div></div>
+          </div>
+          <div class="state-legend">
+            <div><span class="legend-dot alert-dot"></span><span>Alert</span><kbd>silent</kbd></div>
+            <div><span class="legend-dot yawn-dot"></span><span>Yawning</span><kbd>two-note cue</kbd></div>
+            <div><span class="legend-dot uncertain-dot"></span><span>Uncertain</span><kbd>single cue</kbd></div>
+            <div><span class="legend-dot micro-dot"></span><span>Microsleep</span><kbd>urgent cue*</kbd></div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="signal-panel panel">
+        <div class="panel-heading signal-heading">
+          <div><span class="section-index">03</span><h2>Signal detail</h2></div>
+          <span class="signal-caption">SMOOTHED OVER 9 FRAMES <span class="caption-dot"></span></span>
+        </div>
+        <div class="signal-grid">
+          <div class="signal-score">
+            <div class="signal-label-row"><span>Microsleep model score</span><strong id="score-value">—</strong></div>
+            <div class="meter"><span id="score-meter" class="meter-fill score-fill"></span><i class="meter-marker" style="left:90%"></i></div>
+            <div class="meter-foot"><span>0</span><span class="threshold-label">0.90 trigger</span><span>1.0</span></div>
+          </div>
+          <div class="cue-readout">
+            <div class="cue-heading"><span class="cue-glyph eye-glyph">◉</span><span>Eye closure cue</span><strong id="eye-state" class="cue-result">NO DATA</strong></div>
+            <div class="cue-values"><span>EAR <b id="eye-value">—</b></span><span>Narrow / close <b id="eye-threshold">—</b></span></div>
+          </div>
+          <div class="cue-readout">
+            <div class="cue-heading"><span class="cue-glyph mouth-glyph">⌣</span><span>Mouth cue</span><strong id="mouth-state" class="cue-result">NO DATA</strong></div>
+            <div class="cue-values"><span>Ratio <b id="mouth-value">—</b></span><span>Trigger <b id="mouth-threshold">—</b></span></div>
+          </div>
+        </div>
+        <div class="signal-footer"><span><b class="footer-dot"></b> Timed eye cues are visual heuristics; they cannot confirm sleep or guarantee a correct reading.</span><span id="frame-counter">0 frames</span></div>
+      </section>
+
+      <footer class="page-footer">
+        <div class="footer-note"><span class="footer-shield">◈</span><p><strong>Research prototype · not safety-certified</strong><br>Never use the absence of a warning as evidence that you are alert. If drowsy, stop somewhere safe.</p></div>
+        <div class="footer-right"><span id="connection-label">LOCAL SERVER READY</span><span class="footer-separator">/</span><span>MODEL: FL3D CNN</span></div>
+      </footer>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+</body>
+</html>
