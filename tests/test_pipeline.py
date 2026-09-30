@@ -15,7 +15,7 @@ from models.driver_state_cnn import (CLASS_TO_ID, CHECKPOINT_FORMAT,
 from live_inference import (load_driver_state_model, prepare_face_tensor,
                             eye_aspect_ratio, mouth_aperture_ratio,
                             apply_eye_consistency_gate, apply_mouth_consistency_gate,
-                            predict_driver_state)
+                            predict_driver_state, DriverAlertPolicy)
 from vision.extractor import VisionExtractor
 
 torch.set_num_threads(min(4, torch.get_num_threads()))
@@ -203,3 +203,34 @@ def test_eye_closure_gate_abstains_on_alert_with_closed_eyes():
     assert apply_eye_consistency_gate("microsleep", ratio) == "microsleep"
     assert apply_eye_consistency_gate("alert", .3) == "alert"
     assert apply_eye_consistency_gate("microsleep", .3) == "microsleep"
+
+
+def test_driver_alert_requires_sustained_agreement_then_repeats_sound():
+    policy = DriverAlertPolicy(score_threshold=.9, hold_seconds=1.0,
+                               repeat_seconds=4.0, max_evidence_gap=.5)
+
+    assert policy.update(.95, .1, .12, 10.0) == (False, False)
+    assert policy.update(.96, .1, .12, 10.5) == (False, False)
+    assert policy.update(.97, .1, .12, 11.0) == (True, True)
+    assert policy.update(.97, .1, .12, 11.25) == (True, False)
+    assert policy.update(.97, .1, .12, 12.0) == (False, False)
+    assert policy.update(.97, .1, .12, 12.5) == (False, False)
+    assert policy.update(.97, .1, .12, 13.0) == (True, True)
+
+    repeat_policy = DriverAlertPolicy(score_threshold=.9, hold_seconds=1.0,
+                                      repeat_seconds=4.0, max_evidence_gap=1.1)
+    assert repeat_policy.update(.95, .1, .12, 0.0) == (False, False)
+    assert repeat_policy.update(.95, .1, .12, 1.0) == (True, True)
+    assert repeat_policy.update(.95, .1, .12, 2.0) == (True, False)
+    assert repeat_policy.update(.95, .1, .12, 3.0) == (True, False)
+    assert repeat_policy.update(.95, .1, .12, 4.0) == (True, False)
+    assert repeat_policy.update(.95, .1, .12, 5.0) == (True, True)
+
+def test_driver_alert_resets_on_disagreement_or_missing_score():
+    policy = DriverAlertPolicy(score_threshold=.9, hold_seconds=1.0)
+
+    assert policy.update(.95, .1, .12, 0.0) == (False, False)
+    assert policy.update(.95, .1, .12, .5) == (False, False)
+    assert policy.update(.95, .2, .12, .75) == (False, False)
+    assert policy.update(.95, .1, .12, 1.0) == (False, False)
+    assert policy.update(float("nan"), .1, .12, 1.25) == (False, False)

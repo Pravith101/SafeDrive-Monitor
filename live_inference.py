@@ -25,6 +25,7 @@ DEFAULT_MOUTH_OPEN_RATIO_THRESHOLD = MOUTH_OPEN_RATIO_THRESHOLD
 MICROSLEEP_SCORE_THRESHOLD = 0.90
 MICROSLEEP_HOLD_SECONDS = 1.0
 ALERT_REPEAT_SECONDS = 4.0
+MAX_ALERT_EVIDENCE_GAP_SECONDS = 0.5
 
 
 class DriverAlertPolicy:
@@ -32,25 +33,33 @@ class DriverAlertPolicy:
 
     def __init__(self, score_threshold=MICROSLEEP_SCORE_THRESHOLD,
                  hold_seconds=MICROSLEEP_HOLD_SECONDS,
-                 repeat_seconds=ALERT_REPEAT_SECONDS):
+                 repeat_seconds=ALERT_REPEAT_SECONDS,
+                 max_evidence_gap=MAX_ALERT_EVIDENCE_GAP_SECONDS):
         self.score_threshold = score_threshold
         self.hold_seconds = hold_seconds
         self.repeat_seconds = repeat_seconds
+        self.max_evidence_gap = max_evidence_gap
         self.evidence_since = None
+        self.last_supported_at = None
         self.last_sound = None
 
     def update(self, microsleep_score: float, eye_ratio: float,
                eye_closed_threshold: float, now: float) -> tuple[bool, bool]:
         """Return (alert_active, play_sound) for this frame."""
-        supported = (np.isfinite(microsleep_score) and
+        supported = (np.isfinite(now) and np.isfinite(microsleep_score) and
                      microsleep_score >= self.score_threshold and
                      np.isfinite(eye_ratio) and eye_ratio < eye_closed_threshold)
         if not supported:
             self.evidence_since = None
+            self.last_supported_at = None
             self.last_sound = None
             return False, False
-        if self.evidence_since is None:
+        gap = None if self.last_supported_at is None else now - self.last_supported_at
+        if (self.evidence_since is None or gap is None or gap < 0 or
+                gap > self.max_evidence_gap):
             self.evidence_since = now
+            self.last_sound = None
+        self.last_supported_at = now
         active = now - self.evidence_since >= self.hold_seconds
         play_sound = active and (self.last_sound is None or
                                  now - self.last_sound >= self.repeat_seconds)
@@ -214,7 +223,7 @@ def load_uta_rldd_model(checkpoint_path: str | Path, device="cpu"):
 
 
 def run_uta_rldd_monitor(camera_index: int = 0) -> None:
-    """Run the calibrated UTA-RLDD temporal model on non-overlapping 30-second windows."""
+    """Display research-only UTA-RLDD scores; this model is not alert-qualified."""
     from models.uta_rldd_cloud import CLASS_NAMES, FEATURES
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -224,9 +233,10 @@ def run_uta_rldd_monitor(camera_index: int = 0) -> None:
     sequence_length = int(checkpoint["sequence_length"])
     feature_buffer = deque(maxlen=sequence_length)
     sample_fps = float(checkpoint.get("sample_fps", 1.0))
-    last_sample = last_sound = 0.0
+    last_sample = 0.0
     window_frames = 0
     current_message, current_color = "Tracking driver...", (0, 200, 0)
+    print("UTA-RLDD model is research-only; it does not issue driver alerts or audible warnings.")
     cap = None
     face_mesh = None
     try:
@@ -265,7 +275,7 @@ def run_uta_rldd_monitor(camera_index: int = 0) -> None:
                                 prediction = int(probabilities.argmax())
                                 drowsy_score = float(probabilities[2])
                                 if drowsy_score >= float(checkpoint["drowsy_warning_threshold"]):
-                                    current_message, current_color = "DROWSINESS WARNING", (0, 0, 255)
+                                    current_message, current_color = "RESEARCH FLAG - NOT ALERT", (0, 165, 255)
                                 elif prediction == 2:
                                     current_message, current_color = "Possible drowsiness - monitor", (0, 165, 255)
                                 else:
@@ -276,17 +286,9 @@ def run_uta_rldd_monitor(camera_index: int = 0) -> None:
                         feature_buffer.clear()
                         window_frames = 0
                         current_message, current_color = "Face features unavailable", (0, 165, 255)
-            if current_message == "DROWSINESS WARNING":
-                sound_now = time.monotonic()
-                if sound_now - last_sound >= ALERT_REPEAT_SECONDS:
-                    play_driver_warning()
-                    last_sound = sound_now
             cv2.putText(frame, current_message, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                         current_color, 2)
-            if current_message == "DROWSINESS WARNING":
-                cv2.putText(frame, "Stop somewhere safe", (20, 84),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, current_color, 2)
-            elif len(feature_buffer) < sequence_length:
+            if len(feature_buffer) < sequence_length:
                 cv2.putText(frame, f"Collecting features: {len(feature_buffer)}/{sequence_length}s",
                             (20, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             cv2.imshow("SafeDrive Monitor (UTA-RLDD)", frame)
@@ -568,7 +570,7 @@ if __name__ == "__main__":
     parser.add_argument("--temporal", action="store_true",
                         help="Use the UTA-RLDD temporal GRU checkpoint instead of the FL3D CNN")
     parser.add_argument("--uta-rldd", action="store_true",
-                        help="Use the three-class UTA-RLDD checkpoint and validation-calibrated warning threshold")
+                        help="Display research-only UTA-RLDD scores (no driver alerts or sound)")
     cli_args = parser.parse_args()
     if cli_args.image:
         run_image_inference(cli_args.image)
