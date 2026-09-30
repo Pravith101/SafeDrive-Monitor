@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this software or report its UTA-RLDD results, cite the project and the datasets listed in README.md."
+title: "SafeDrive Monitor"
+type: software
+authors:
+  - name: "saahiil08"
+repository-code: "https://github.com/Pravith101/SafeDrive-Monitor"
+license: MIT
+date-released: 2026-09-30

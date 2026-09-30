@@ -35,4 +35,4 @@ git show --format=fuller --stat HEAD
 git push -u origin team/short-task-name
 ```
 
-Do not stage datasets, model weights, generated arrays, local environments, credentials, or editor state. Keep test and evaluation results tied to the exact data and split used. A commit should be attributed only to people who authored or explicitly approved its changes.
+Do not add or stage new datasets, model weights, generated arrays, local environments, credentials, or editor state. The UTA-RLDD report and checkpoints already in `weights/` are the documented outputs of the completed experiment; see `MODEL_CARD.md` for their limits and source terms. Keep new test and evaluation results tied to the exact data and split used. A commit should be attributed only to people who authored or explicitly approved its changes.

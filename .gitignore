@@ -10,6 +10,16 @@ env/
 safedrive_env/
 .vscode/
 
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+kaggle.json
+**/kaggle.json
+*.pem
+*.key
+secrets/
+
 # Dataset, processed outputs, model checkpoints and local caches
 data/raw_dataset/
 data/downloaded/
@@ -18,3 +28,5 @@ weights/
 pip_temp/
 *.joblib
 *.pth
+*.npz
+*.log

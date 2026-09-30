@@ -1,6 +1,6 @@
 # SafeDrive Monitor
 
-A research prototype that estimates driver state from a face crop. Its three labels are **alert**, **microsleep**, and **yawning**. This is not a certified driver-safety system and must not be used as the sole basis for driving decisions.
+A research prototype that estimates driver state from a face crop. Its three labels are **alert**, **microsleep**, and **yawning**. This is not a certified driver-safety system and must not be used as the sole basis for driving decisions. Source code is licensed under MIT; dataset and data-derived model terms are separate. See [MODEL_CARD.md](MODEL_CARD.md) and [CITATION.cff](CITATION.cff) before reuse or publication.
 
 ## Cloud training with pretrained weights
 
@@ -10,7 +10,7 @@ Only the trained checkpoint and report need to be downloaded from Kaggle. Put `d
 
 ## UTA-RLDD participant-held-out evaluation
 
-[`models/uta_rldd_cloud.ipynb`](models/uta_rldd_cloud.ipynb) and [`models/uta_rldd_cloud.py`](models/uta_rldd_cloud.py) provide a separate Kaggle workflow for the roughly 111 GB [UTA-RLDD dataset](https://sites.google.com/view/utarldd/home). Attach both `rishab260/uta-reallife-drowsiness-dataset` (participant folds 1–4) and `mathiasviborg/uta-rldd-fold5` (fold 5) as notebook inputs, enable a GPU, and run the notebook. The notebook uses MediaPipe 0.10.35's maintained Tasks Face Landmarker API and downloads only its small landmark model into Kaggle working storage. Videos and extracted features stay in Kaggle; the output contains five held-out-fold reports and checkpoints. Both Kaggle uploaders list CC0, but the mirrors are unofficial and their provenance/right to relicense are not independently verified. Prefer the official UTA source and cite Ghoddoosian, Galib, and Athitsos (CVPR Workshops 2019). Do not publicly share identifiable participant imagery.
+[`models/uta_rldd_cloud.ipynb`](models/uta_rldd_cloud.ipynb) and [`models/uta_rldd_cloud.py`](models/uta_rldd_cloud.py) provide a separate Kaggle workflow for the roughly 111 GB [UTA-RLDD dataset](https://sites.google.com/view/utarldd/home). Attach both `rishab260/uta-reallife-drowsiness-dataset` (participant folds 1–4) and `mathiasviborg/uta-rldd-fold5` (fold 5) as notebook inputs, enable a GPU, and run the notebook. The notebook uses MediaPipe 0.10.35's maintained Tasks Face Landmarker API and downloads only its small landmark model into Kaggle working storage. Videos and extracted features stay in Kaggle; the output contains five held-out-fold reports and checkpoints. Both Kaggle uploaders list CC0, but the mirrors are unofficial and their provenance/right to relicense are not independently verified. The original UTA-RLDD site says only 36 of 60 participants allowed publication of their faces. Do not share raw or identifiable participant imagery; review [MODEL_CARD.md](MODEL_CARD.md) before redistributing data-derived artifacts. Cite Ghoddoosian, Galib, and Athitsos (CVPR Workshops 2019).
 
 The workflow keeps each participant in one published fold, trains a three-class GRU over 30-second MediaPipe feature sequences, and tunes a drowsiness threshold on inner validation participants only. It evaluates the held-out participants at the video level and reports missed drowsy videos, non-drowsy videos with warnings, and time from clip start to the first threshold-crossing window. Since UTA-RLDD labels only each whole video's predominant state, it cannot provide true event-level misses or warning delay from the actual onset of drowsiness. FL3D's frame-level report remains separate; the label sets and evaluation units are not merged.
 
@@ -32,7 +32,7 @@ This research prototype is not safety-certified and cannot establish that a real
 
 ## Dataset, labels, and license
 
-The project trains on [FL3D (Frame Level Driver Drowsiness Detection)](https://www.kaggle.com/datasets/matjazmuc/frame-level-driver-drowsiness-detection-fl3d), a frame-labeled derivative of the [NITYMED night-time driver dataset](https://datasets.esdalab.ece.uop.gr/). The FL3D Kaggle dataset is about **645 MB** and declares **CC BY-SA 4.0**. Attribute the FL3D dataset author and the NITYMED authors, preserve the license for distributed adaptations, and cite the referenced dataset work before reuse or redistribution.
+The project trains on [FL3D (Frame Level Driver Drowsiness Detection)](https://www.kaggle.com/datasets/matjazmuc/frame-level-driver-drowsiness-detection-fl3d), a frame-labeled derivative of the [NITYMED night-time driver dataset](https://datasets.esdalab.ece.uop.gr/). The FL3D Kaggle dataset is about **645 MB** and declares **CC BY-SA 4.0**. The [NITYMED source page](https://datasets.esdalab.ece.uop.gr/) declares CC BY and requires a citation. Attribute Maťjaz Muc’s FL3D release, cite Petrellis et al., *NITYMED*, IEEE DataPort (2022), [doi:10.21227/85xe-3f88](https://doi.org/10.21227/85xe-3f88), and preserve the share-alike terms when distributing FL3D adaptations.
 
 FL3D defines three frame labels: `alert`, `microsleep`, and `yawning`. Its annotations mark closed-eye frames in microsleep sessions as `microsleep`, and wide-open-mouth frames in yawning sessions as `yawning`; blink frames are omitted. These are observable event labels, not medical diagnoses or a continuous drowsiness rating. A `microsleep` or `yawning` prediction is a warning cue; `alert` means only that the current frame resembles the dataset's alert class.
 
@@ -73,7 +73,7 @@ Press `q` in the camera window to quit. The live demo smooths CNN scores across 
 
 The `0.90` softmax score is a conservative trigger setting, not a calibrated probability that a prediction is correct. Requiring sustained agreement from the CNN and eye-closure measurement reduces unsupported warnings, but cannot make the system certain: on held-out FL3D videos the CNN missed about 29% of microsleep frames, and the eye-closure cue also misses many events. Treat warnings as a prompt to check yourself and stop somewhere safe if drowsy; never rely on this prototype as a safety system or use its lack of a warning as evidence that driving is safe. The model was trained on night-time, face-cropped footage; daylight webcam performance and person-level generalization require separate validation.
 
-Training writes ignored artifacts: `weights/driver_state_cnn.pth` and `weights/driver_state_evaluation.json`. The report contains exact split video IDs, class counts, validation metrics, test metrics, confusion matrix, and training hardware. No model weights or dataset files are tracked in Git.
+FL3D training writes ignored artifacts: `weights/driver_state_cnn.pth` and `weights/driver_state_evaluation.json`. The report includes the split IDs, class counts, metrics, confusion matrix, and training hardware. The repository tracks the completed UTA-RLDD evaluation report and six small UTA model checkpoints in `weights/`; it does not contain raw dataset videos or face images. Those UTA artifacts and their licensing caveats are documented in [MODEL_CARD.md](MODEL_CARD.md).
 
 ## Current pretrained FL3D checkpoint
 
@@ -97,6 +97,10 @@ Test per-class precision / recall / F1: alert **90.71 / 98.55 / 94.47%**; micros
 The same script calibrates an eye-closure threshold from alert and microsleep frames only. It uses the mean six-point eye aspect ratio for the two eyes. The threshold was **0.12484**. Of 479 validation images with detected faces, precision for the closed-eye cue was **99.32%** with **60.83%** recall. On 471 test images, precision was **100.00%** with only **22.32%** recall. This low test recall means many microsleep frames are missed; the cue only withholds an `alert` result when eyes are strongly closed. These sampled cue measurements are not the CNN’s three-class metrics.
 
 The supplied screenshots were run through the same still-image inference path. On the closed-eye frame, the raw CNN said `alert`, but its eye ratio was **0.0897**, below the calibrated threshold, so the result is `uncertain`. On the open-eye, closed-mouth frame, it said `yawning` with a mouth ratio of **0.0055**, so that result is also `uncertain`. These two examples are regression checks, not independent accuracy estimates.
+
+## License and citation
+
+The MIT license in [LICENSE](LICENSE) applies to project source code. It does not replace third-party dataset or model terms, which remain as described in [MODEL_CARD.md](MODEL_CARD.md). Use [CITATION.cff](CITATION.cff) for software citation metadata and cite the original dataset papers when reporting results.
 
 ## Tests
 
